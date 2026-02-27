@@ -195,42 +195,6 @@ class DataBinder:
 
         return df[source_col].tolist()
 
-    @staticmethod
-    def _convert_time_values(values):
-        """datetime.time 값을 분(minutes) 정수로 변환"""
-        import datetime
-        if values is None:
-            return None
-        if isinstance(values, datetime.time):
-            return values.hour * 60 + values.minute + round(values.second / 60)
-        if isinstance(values, datetime.timedelta):
-            return int(values.total_seconds() / 60)
-        if isinstance(values, list):
-            result = []
-            for v in values:
-                if isinstance(v, datetime.time):
-                    result.append(v.hour * 60 + v.minute + round(v.second / 60))
-                elif isinstance(v, datetime.timedelta):
-                    result.append(int(v.total_seconds() / 60))
-                elif v is None:
-                    result.append(0)
-                else:
-                    result.append(v)
-            return result
-        if isinstance(values, dict):
-            result = {}
-            for k, v in values.items():
-                if isinstance(v, datetime.time):
-                    result[k] = v.hour * 60 + v.minute + round(v.second / 60)
-                elif isinstance(v, datetime.timedelta):
-                    result[k] = int(v.total_seconds() / 60)
-                elif v is None:
-                    result[k] = 0
-                else:
-                    result[k] = v
-            return result
-        return values
-
     def bind_all(self, math_model: Dict) -> Dict[str, Any]:
         """
         IR 전체를 바인딩하여 실제 데이터가 채워진 딕셔너리를 반환.
@@ -254,8 +218,6 @@ class DataBinder:
         for p in math_model.get("parameters", []):
             pid = p.get("id", "")
             values = self.get_parameter_values(p)
-            # datetime.time -> 분(minutes) 정수 변환
-            values = self._convert_time_values(values)
             bound["parameters"][pid] = values
 
         # Sets 바인딩 (자동 range 보정 포함)

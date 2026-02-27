@@ -67,6 +67,9 @@ class ORToolsCompiler(BaseCompiler):
                 if not combos:
                     warnings.append(f"Variable {vid}: no index combinations generated")
 
+        # DEBUG: sets 정보
+        for s in math_model.get("sets", []):
+            logger.info(f"DEBUG set '{s.get('id')}': source_type={s.get('source_type','N/A')}, size={s.get('size','N/A')}, source_file={s.get('source_file','N/A')}, source_column={s.get('source_column','N/A')}")
         logger.info(f"CP-SAT: created {total_vars} variables")
 
         # 2. 제약조건 - struct_builder 사용 (3단계 fallback)

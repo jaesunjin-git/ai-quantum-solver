@@ -345,11 +345,6 @@ def build_objective(
 def apply_constraint_cpsat(model, lhs, op: str, rhs) -> bool:
     """CP-SAT 모델에 제약 추가"""
     try:
-        # CP-SAT은 정수만 허용 - float를 int로 변환
-        if isinstance(rhs, float):
-            rhs = int(rhs)
-        if isinstance(lhs, float):
-            lhs = int(lhs)
         if op == '==':
             model.Add(lhs == rhs)
         elif op == '<=':

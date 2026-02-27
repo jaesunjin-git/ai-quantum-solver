@@ -195,42 +195,6 @@ class DataBinder:
 
         return df[source_col].tolist()
 
-    @staticmethod
-    def _convert_time_values(values):
-        """datetime.time 값을 분(minutes) 정수로 변환"""
-        import datetime
-        if values is None:
-            return None
-        if isinstance(values, datetime.time):
-            return values.hour * 60 + values.minute + round(values.second / 60)
-        if isinstance(values, datetime.timedelta):
-            return int(values.total_seconds() / 60)
-        if isinstance(values, list):
-            result = []
-            for v in values:
-                if isinstance(v, datetime.time):
-                    result.append(v.hour * 60 + v.minute + round(v.second / 60))
-                elif isinstance(v, datetime.timedelta):
-                    result.append(int(v.total_seconds() / 60))
-                elif v is None:
-                    result.append(0)
-                else:
-                    result.append(v)
-            return result
-        if isinstance(values, dict):
-            result = {}
-            for k, v in values.items():
-                if isinstance(v, datetime.time):
-                    result[k] = v.hour * 60 + v.minute + round(v.second / 60)
-                elif isinstance(v, datetime.timedelta):
-                    result[k] = int(v.total_seconds() / 60)
-                elif v is None:
-                    result[k] = 0
-                else:
-                    result[k] = v
-            return result
-        return values
-
     def bind_all(self, math_model: Dict) -> Dict[str, Any]:
         """
         IR 전체를 바인딩하여 실제 데이터가 채워진 딕셔너리를 반환.
@@ -250,53 +214,18 @@ class DataBinder:
             "set_sizes": {},
         }
 
-        # Parameters 먼저 바인딩 (set 보정에 필요)
-        for p in math_model.get("parameters", []):
-            pid = p.get("id", "")
-            values = self.get_parameter_values(p)
-            # datetime.time -> 분(minutes) 정수 변환
-            values = self._convert_time_values(values)
-            bound["parameters"][pid] = values
-
-        # Sets 바인딩 (자동 range 보정 포함)
+        # Sets 바인딩
         for s in math_model.get("sets", []):
             sid = s.get("id", "")
             values = self.get_set_values(s)
-
-            # 자동 보정: set이 변수의 인덱스로 사용되는데 크기가 비정상적으로 작은 경우
-            # 파라미터에서 실제 크기를 찾아 range로 대체
-            if len(values) < 20:
-                # 변수 정의에서 이 set을 인덱스로 사용하는지 확인
-                is_var_index = False
-                for var_def in math_model.get("variables", []):
-                    if sid in var_def.get("indices", []):
-                        is_var_index = True
-                        break
-
-                if is_var_index:
-                    # 파라미터에서 이 set의 크기 정보 찾기
-                    size_param_names = [
-                        f"total_{s.get('name', '').lower()}",
-                        f"total_{sid.lower()}",
-                        f"total_{s.get('name', '').lower()}_count",
-                        f"{s.get('name', '').lower()}_count",
-                        "total_crew", "total_crew_count",
-                        "num_crews", "num_workers", "num_employees",
-                    ]
-                    for pname in size_param_names:
-                        pval = bound["parameters"].get(pname)
-                        if pval is not None:
-                            try:
-                                size = int(float(str(pval)))
-                            except (ValueError, TypeError):
-                                continue
-                            if size > len(values):
-                                logger.info(f"Set {sid}: auto-corrected from {len(values)} items to range(1..{size}) using param '{pname}'")
-                                values = list(range(1, size + 1))
-                                break
-
             bound["sets"][sid] = values
             bound["set_sizes"][sid] = len(values)
+
+        # Parameters 바인딩
+        for p in math_model.get("parameters", []):
+            pid = p.get("id", "")
+            values = self.get_parameter_values(p)
+            bound["parameters"][pid] = values
 
         return bound
 

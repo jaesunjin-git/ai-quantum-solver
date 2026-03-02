@@ -25,7 +25,6 @@ from domains.crew.utils import (
 from domains.crew.skills.general import skill_general
 
 from engine.math_model_generator import generate_math_model, summarize_model
-from engine.gates.gate2_model_validate import run as run_gate2, to_text_summary as gate2_to_text
 from core.version.model_service import create_model_version
 
 logger = logging.getLogger(__name__)
@@ -121,38 +120,6 @@ async def skill_math_model(model, session: CrewSession, project_id: str, message
 
         model = result["model"]
         validation = result["validation"]
-
-        # ★ Gate 2: 모델 유효성 검증
-        from engine.compiler.base import DataBinder
-        binder = DataBinder(project_id)
-        binder.load_files()
-        # Gate 1 프로파일 재생성 (규칙 기반이므로 항상 동일)
-        from engine.gates.gate1_data_profile import run as run_gate1
-        data_profile = run_gate1(binder._dataframes)
-        gate2_result = run_gate2(model, data_profile=data_profile, dataframes=binder._dataframes)
-        logger.info(f"Gate2: valid={gate2_result['valid']}, "
-                     f"errors={len(gate2_result['errors'])}, "
-                     f"warnings={len(gate2_result['warnings'])}, "
-                     f"actual_vars={gate2_result['actual_variable_count']}")
-
-        # 교정된 변수 수를 validation에 추가
-        if gate2_result.get("corrections"):
-            if not validation.get("warnings"):
-                validation["warnings"] = []
-            for key, val in gate2_result["corrections"].items():
-                validation["warnings"].append(f"자동 교정: {key} {val['old']} → {val['new']}")
-
-        # Gate 2 경고를 validation에 병합
-        if gate2_result.get("warnings"):
-            if not validation.get("warnings"):
-                validation["warnings"] = []
-            validation["warnings"].extend(gate2_result["warnings"])
-
-        # Gate 2 오류가 있으면 사용자에게 알림 (모델은 저장하되 경고 표시)
-        if gate2_result.get("errors"):
-            if not validation.get("errors"):
-                validation["errors"] = []
-            validation["errors"].extend(gate2_result["errors"])
 
         # 세션에 저장
         state.math_model = model

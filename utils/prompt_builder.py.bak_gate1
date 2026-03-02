@@ -197,7 +197,6 @@ def build_analysis_prompt(
     domain_confidence: float = 0.0,
     domain_override: Optional[str] = None,
     data_facts: str = "",  # ★ 추가
-    data_profile_text: str = "",  # ★ Gate 1 프로파일
 ) -> str:
     """분석 프롬프트를 조립하여 반환"""
 
@@ -281,15 +280,6 @@ def build_analysis_prompt(
             f"리포트 작성 시 이 수치를 반드시 그대로 사용하세요. "
             f"절대 다른 숫자로 변경하거나 추정하지 마세요.\n\n"
             f"{data_facts}"
-        )
-
-    # ★ Gate 1: 데이터 프로파일 (규칙 기반 자동 감지 결과)
-    if data_profile_text:
-        sections.append(
-            f"\n---\n## DATA PROFILE (자동 감지)\n"
-            f"아래는 코드가 자동으로 감지한 데이터 구조 정보입니다. "
-            f"분석 시 이 정보를 참고하여 데이터 타입, 결측치, 비정형 구조를 정확히 반영하세요.\n\n"
-            f"{data_profile_text}"
         )
 
     final_prompt = "\n\n".join(sections)

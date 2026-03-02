@@ -126,26 +126,6 @@ async def run_pre_decision_analysis(
 # ============================================================
 # 수학 모델 특성 분석
 # ============================================================
-
-def _get_set_size(set_def: Dict) -> int:
-    """Set 정의에서 크기를 결정하는 헬퍼"""
-    # 1. source_type: "range"
-    if set_def.get("source_type") == "range":
-        size = set_def.get("size", 0)
-        if size > 0:
-            return size
-    # 2. elements
-    elements = set_def.get("elements", [])
-    if elements:
-        return len(elements)
-    # 3. explicit values
-    values = set_def.get("values", [])
-    if values:
-        return len(values)
-    # 4. 크기를 결정할 수 없음
-    return 0
-
-
 def _analyze_math_model(math_model: Dict) -> Dict:
     """수학 모델을 분석하여 전략 결정에 필요한 특성을 추출"""
 
@@ -185,10 +165,13 @@ def _analyze_math_model(math_model: Dict) -> Dict:
             product = 1
             for idx_id in indices:
                 set_def = sets_map.get(idx_id, {})
-                set_size = _get_set_size(set_def)
-                if set_size > 0:
-                    product *= set_size
+                # elements가 있으면 그 길이, 없으면 추정
+                elements = set_def.get("elements", [])
+                if elements:
+                    product *= len(elements)
                 else:
+                    # elements가 없으면 metadata의 추정치에서 역산 불가
+                    # 이 경우 LLM 추정치 사용
                     product = 0
                     break
             if product > 0:

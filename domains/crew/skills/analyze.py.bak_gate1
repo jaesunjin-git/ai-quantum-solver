@@ -12,7 +12,6 @@ skill_show_analysis: 이전 분석 결과를 다시 표시.
 """
 
 from engine.file_service import analyze_csv_summary
-from engine.gates.gate1_data_profile import run as run_gate1, to_text_summary as gate1_to_text
 
 import logging
 import re
@@ -109,22 +108,12 @@ async def skill_analyze(model, session: CrewSession, project_id: str, message: s
         # 팩트 요약을 프롬프트에 포함
         facts_summary = build_facts_summary(data_facts)
 
-        # ★ Gate 1: 데이터 품질 프로파일링
-        from engine.compiler.base import DataBinder
-        binder = DataBinder(project_id)
-        binder.load_files()
-        data_profile = run_gate1(binder._dataframes)
-        state.data_profile = data_profile
-        profile_text = gate1_to_text(data_profile)
-        logger.info(f"Gate1 completed: {len(data_profile.get('warnings', []))} warnings")
-
         prompt = build_analysis_prompt(
             csv_summary=csv_summary or "데이터 요약을 생성할 수 없습니다.",
             context=state.context_string(),
             detected_domain=domain,
             domain_confidence=confidence,
             data_facts=facts_summary,
-            data_profile_text=profile_text,
         )
         response = await asyncio.to_thread(
             model.generate_content, prompt

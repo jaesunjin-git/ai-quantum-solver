@@ -1,0 +1,91 @@
+# AI Quantum Solver - Data Type Detection Rules
+# Version: 1.0
+
+version: "1.0"
+
+data_types:
+  timetable:
+    name_ko: "시간표 / 운행 계획"
+    column_keywords:
+      - ["departure", "arrival", "출발", "도착", "dep_time", "arr_time"]
+      - ["station", "역", "역명", "정거장"]
+      - ["train", "열차", "trip", "운행"]
+    structural_hints:
+      - "rows represent individual trips or segments"
+      - "time columns in HH:MM or minutes format"
+    extraction_keys:
+      - trip_count
+      - station_list
+      - direction_count
+      - time_range
+      - line_count
+
+  work_regulations:
+    name_ko: "근무 규정 / 협약"
+    column_keywords:
+      - ["max_work", "max_drive", "최대근무", "최대승무"]
+      - ["break", "휴식", "rest", "식사"]
+      - ["overtime", "초과근무", "연장"]
+    structural_hints:
+      - "parameter-value pairs or key-value table"
+      - "contains time durations or limits"
+    extraction_keys:
+      - max_work_minutes
+      - max_driving_minutes
+      - min_break_minutes
+      - prep_time_minutes
+      - cleanup_time_minutes
+      - night_rest_minutes
+
+  crew_info:
+    name_ko: "승무원 정보"
+    column_keywords:
+      - ["crew", "승무원", "기관사", "driver", "employee"]
+      - ["qualification", "자격", "등급", "grade"]
+      - ["base", "소속", "depot", "사업소"]
+    structural_hints:
+      - "one row per crew member"
+      - "contains ID and attribute columns"
+    extraction_keys:
+      - crew_count
+      - qualification_types
+      - depot_list
+
+  existing_duty:
+    name_ko: "기존 듀티표 / DIA"
+    column_keywords:
+      - ["duty", "듀티", "DIA", "교번", "근무번호"]
+      - ["sequence", "순서", "order"]
+      - ["start_time", "end_time", "시작", "종료"]
+    structural_hints:
+      - "rows represent duty assignments or DIA entries"
+      - "may include trip sequences within each duty"
+    extraction_keys:
+      - duty_count
+      - avg_duty_duration
+      - duty_types
+
+  demand_profile:
+    name_ko: "수요 프로필"
+    column_keywords:
+      - ["demand", "수요", "passengers", "승객"]
+      - ["peak", "첨두", "off_peak", "비첨두"]
+      - ["headway", "배차간격", "frequency"]
+    structural_hints:
+      - "time-indexed demand or frequency data"
+    extraction_keys:
+      - peak_hours
+      - min_headway
+      - max_headway
+
+  constraint_document:
+    name_ko: "제약조건 문서"
+    column_keywords:
+      - ["constraint", "제약", "조건", "규칙", "rule"]
+    structural_hints:
+      - "text-heavy document or structured rules"
+      - "may be a PDF or markdown file"
+    extraction_keys:
+      - constraint_list
+      - hard_constraint_count
+      - soft_constraint_count

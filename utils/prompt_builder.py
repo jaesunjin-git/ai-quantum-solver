@@ -2,7 +2,7 @@
 # ============================================================
 # v2.0 : detected_domain, domain_confidence 파라미터 추가
 # v2.1 : domain_instruction을 HTML 주석으로 변경
-# v3.0 : 하드코딩 DOMAIN_PROFILES 제거 → configs/domain_profiles.yaml 로드
+# v3.0 : 하드코딩 DOMAIN_PROFILES 제거 → knowledge/domain_profiles.yaml 로드
 #         YAML 구조(terminology, typical_constraints, typical_objectives,
 #         regulations, detection_keywords)를 프롬프트에 반영
 # ============================================================
@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # YAML 경로
 # ============================================================
-_PROFILES_PATH = Path(__file__).parents[1] / "configs" / "domain_profiles.yaml"
-_TEMPLATE_PATH = Path(__file__).parents[1] / "Prompts" / "crew" / "analysis_report.md"
+_PROFILES_PATH = Path(__file__).parents[1] / "knowledge" / "domain_profiles.yaml"
+_TEMPLATE_PATH = Path(__file__).parents[1] / "prompts" / "analysis_report.md"
 
 # 캐시 (한 번만 로드)
 _profiles_cache: Optional[Dict[str, Any]] = None
@@ -29,7 +29,7 @@ _profiles_cache: Optional[Dict[str, Any]] = None
 # 프로파일 로더
 # ============================================================
 def _load_profiles() -> Dict[str, Any]:
-    """configs/domain_profiles.yaml을 로드하여 캐시. 실패 시 최소 fallback."""
+    """knowledge/domain_profiles.yaml을 로드하여 캐시. 실패 시 최소 fallback."""
     global _profiles_cache
     if _profiles_cache is not None:
         return _profiles_cache

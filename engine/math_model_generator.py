@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
-from typing import Dict, Any, Optional
+from typing import List,  Dict, Any, Optional
 
 import google.generativeai as genai
 from core.config import settings
@@ -90,19 +90,164 @@ def _format_facts_for_model(facts: Optional[dict]) -> str:
 
     lines.append("")
     lines.append("중요: estimated_variable_count는 위 고유값 수를 기반으로 정확히 계산하세요.")
-    lines.append("예: 승무원 96명 × 사업 25개 = binary 변수 2400개")
+    lines.append("예: 인원 N명 × 작업 M개 = binary 변수 N*M개")
 
     return "\n".join(lines)
 
 # ============================================================
 # 프롬프트 빌더
 # ============================================================
+
+def _build_data_guide(dataframes: dict) -> str:
+    """DataBinder의 dataframes로부터 LLM용 데이터 소스 가이드 생성 (범용)"""
+    guide_lines = []
+    guide_lines.append("아래는 사용 가능한 정형 데이터 소스입니다. Set/Parameter 정의 시 반드시 이 목록의 source_file과 source_column만 사용하세요.")
+    guide_lines.append("")
+    
+    # 비정형 블록 키 패턴 감지 (범용)
+    block_patterns = []
+    summary_keys = []
+    for key in dataframes.keys():
+        if "__summary" in key:
+            summary_keys.append(key)
+        parts = key.split("__")
+        if len(parts) >= 2 and parts[-1] not in ("summary",):
+            block_patterns.append(key)
+    
+    # ★ 정규화 데이터가 있으면 원본 파일은 data_guide에서 제외
+    has_normalized = any(k.startswith("normalized/") for k in dataframes.keys())
+    if has_normalized:
+        # 정규화 파일의 원본 소스 파일명 수집
+        _skip_originals = set()
+        for _nk, _ndf in dataframes.items():
+            if not _nk.startswith("normalized/"):
+                continue
+            # parameters.csv의 source 컬럼에서 원본 파일명 추출
+            if "source" in _ndf.columns:
+                for _src in _ndf["source"].dropna().unique():
+                    # "text:파일명" 또는 "파일명:시트명" 또는 "파일명" 형식
+                    _clean = str(_src).replace("text:", "").split(":")[0].strip()
+                    if _clean:
+                        _skip_originals.add(_clean)
+        # 정규화 데이터가 존재하면 normalized/ 이외의 모든 원본 파일을 스킵
+        # (trips.csv, parameters.csv에 모든 필요한 데이터가 이미 정리됨)
+        for _ok in list(dataframes.keys()):
+            if not _ok.startswith("normalized/"):
+                _skip_originals.add(_ok)
+        logger.info(f"Data guide: normalized mode, skipping {len(_skip_originals)} original keys")
+    else:
+        _skip_originals = set()
+
+    for key in sorted(dataframes.keys()):
+        # 개별 블록 테이블은 제외 (summary만 포함)
+        if key in block_patterns:
+            continue
+        # 정규화 모드에서 원본 스킵
+        if has_normalized and key in _skip_originals:
+            continue
+        df = dataframes[key]
+        if len(df) == 0:
+            continue
+        
+        # Unnamed 컬럼이 과반수인 시트는 비정형으로 표시
+        unnamed_ratio = sum(1 for c in df.columns if "Unnamed" in str(c)) / max(len(df.columns), 1)
+        if unnamed_ratio > 0.5:
+            guide_lines.append(f"■ {key} ({len(df)}행) ← 비정형 데이터, 직접 참조 금지")
+            guide_lines.append("")
+            continue
+        
+        cols_info = []
+        for col in df.columns[:15]:
+            dtype = str(df[col].dtype)
+            non_null = int(df[col].notna().sum())
+            unique = int(df[col].nunique())
+            sample = ""
+            non_null_vals = df[col].dropna()
+            if len(non_null_vals) > 0:
+                sample = str(non_null_vals.iloc[0])[:30]
+            cols_info.append(f"    - {col} ({dtype}, {non_null}행, {unique}고유값, 예: {sample})")
+        
+        marker = ""
+        if key in summary_keys:
+            marker = " ← 블록 파서 집계 데이터"
+        
+        guide_lines.append(f"■ {key} ({len(df)}행, {len(df.columns)}컬럼){marker}")
+        guide_lines.extend(cols_info[:10])
+        if len(cols_info) > 10:
+            guide_lines.append(f"    ... 외 {len(cols_info)-10}개 컬럼")
+        guide_lines.append("")
+    
+    # 권장 Set 매핑 (데이터 기반 자동 추론)
+    guide_lines.append("★ 권장 Set 매핑:")
+    
+    # 운행/작업 set 후보: 가장 많은 행 + 5개 이상 컬럼 + Unnamed 없는 시트
+    best_source = None
+    best_rows = 0
+    for key, df in dataframes.items():
+        if key in block_patterns or "__summary" in key:
+            continue
+        unnamed_count = sum(1 for c in df.columns if "Unnamed" in str(c))
+        if unnamed_count > 0:
+            continue
+        if len(df) > best_rows and len(df.columns) > 5:
+            best_rows = len(df)
+            first_col = str(df.columns[0])
+            best_source = (key.split("::")[0] if "::" in key else key, first_col, len(df))
+    
+    if best_source:
+        guide_lines.append(
+            f"  - Set I (주요 작업/운행): source_file='{best_source[0]}', "
+            f"source_column='{best_source[1]}' ({best_source[2]}개) ← 권장"
+        )
+    
+    # 인원 수 추론: 숫자형 컬럼에서 "전체" 행의 값
+    crew_size = None
+    for key, df in dataframes.items():
+        if key in block_patterns or "__summary" in key:
+            continue
+        for _, row in df.iterrows():
+            row_str = " ".join(str(v) for v in row.values)
+            if "전체" in row_str:
+                for v in row.values:
+                    try:
+                        num = int(float(str(v)))
+                        if 10 < num < 10000 and crew_size is None:
+                            crew_size = num
+                    except (ValueError, TypeError):
+                        pass
+    
+    if crew_size:
+        guide_lines.append(
+            f"  - Set J (인원/자원): source_type='range', size={crew_size} "
+            f"← 데이터에서 감지된 총 인원 수"
+        )
+    else:
+        guide_lines.append(
+            "  - Set J (인원/자원): 개별 목록이 없으면 source_type='range', size=N 사용"
+        )
+    
+    if summary_keys:
+        guide_lines.append(
+            f"  - 집계 데이터는 {summary_keys[0]} 등 __summary 테이블에서 참조"
+        )
+    
+    guide_lines.append("")
+    guide_lines.append("★ 주의사항:")
+    guide_lines.append("  - 'Unnamed: N' 형태의 컬럼은 비정형 데이터이므로 참조 금지")
+    guide_lines.append("  - for_each와 sum.over에 동일 set을 사용하면 안 됩니다")
+    guide_lines.append("    (예: for_each='j in J'이면 sum.over='i in I'로 다른 set 사용)")
+    guide_lines.append("  - source_file/source_column이 없는 파라미터는 반드시 default_value를 설정하세요")
+    
+    return "\n".join(guide_lines)
+
 def _build_modeling_prompt(
     csv_summary: str,
     analysis_report: str,
     domain: str,
     user_objective: Optional[str] = None,
     data_facts: Optional[dict] = None,
+    data_guide: str = "",
+    confirmed_problem=None,
 ) -> str:
     """LLM에게 수학 모델 JSON 생성을 요청하는 프롬프트를 조립 (YAML 기반)"""
 
@@ -132,7 +277,30 @@ def _build_modeling_prompt(
             "데이터와 도메인 특성을 분석하여 가장 적절한 목적함수를 추론하세요."
         )
 
-    # 프롬프트 조립
+    # 확정된 문제 정의 섹션
+    confirmed_section = ""
+    if confirmed_problem:
+        import json as _json
+        # 1계층 파라미터 목록 동적 생성
+        _cp_params = confirmed_problem.get("parameters", {})
+        _param_lines = []
+        for _pid, _pval in _cp_params.items():
+            if isinstance(_pval, dict):
+                _v = _pval.get("default", _pval.get("value", ""))
+            else:
+                _v = _pval
+            _param_lines.append(f"  - {_pid} (value: {_v})")
+        _param_list_text = "\n".join(_param_lines) if _param_lines else "  (none)"
+        _param_ids = ", ".join(_cp_params.keys())
+        
+        confirmed_section = (
+            f"\n[확정된 문제 정의]\n"
+            + _json.dumps(confirmed_problem, ensure_ascii=False, indent=2)
+            + f"\n\n[사용 가능한 파라미터 목록 - 1계층 (시스템 자동 주입)]\n"
+            + f"아래 {len(_cp_params)}개 파라미터는 시스템이 자동 주입합니다:\n"
+            + _param_list_text
+            + f"\n(id 목록: {_param_ids})\n\n"
+        )
     prompt = f"""{system}
 
 중요 규칙:
@@ -148,6 +316,9 @@ def _build_modeling_prompt(
 
 [검증된 데이터 팩트]
 {_format_facts_for_model(data_facts)}
+
+[사용 가능한 데이터 소스 - 반드시 참조]
+{confirmed_section}{data_guide}
 
 [데이터 요약]
 {csv_summary[:4000]}
@@ -430,6 +601,8 @@ async def generate_math_model(
     user_objective: Optional[str] = None,
     data_facts: Optional[dict] = None,
     retry_feedback: str = "",
+    dataframes: Optional[Dict] = None,
+    confirmed_problem: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """
     LLM을 호출하여 수학 모델 JSON을 생성하고 검증한다.
@@ -451,12 +624,19 @@ async def generate_math_model(
         }
 
     try:
+        # data_guide 생성
+        data_guide = ""
+        if dataframes:
+            data_guide = _build_data_guide(dataframes)
+            logger.info(f"Data guide generated: {len(data_guide)} chars")
+
         prompt = _build_modeling_prompt(
             csv_summary=csv_summary,
             analysis_report=analysis_report,
             domain=domain,
             user_objective=user_objective,
             data_facts=data_facts,
+            data_guide=data_guide, confirmed_problem=confirmed_problem,
         )
 
         # ★ 재시도 피드백이 있으면 프롬프트에 추가
@@ -490,6 +670,120 @@ async def generate_math_model(
             }
 
         # 검증
+
+        # ★ 1계층 파라미터 주입 (동적, 하드코딩 없음)
+        if confirmed_problem and model:
+            _cp_params = confirmed_problem.get("parameters", {})
+            _cp_ids_lower = {k.lower() for k in _cp_params.keys()}
+            
+            # LLM 생성 파라미터에서 1계층과 정확/유사 일치 제거
+            _model_params = model.get("parameters", [])
+            # 1계층 id에서 핵심 단어 추출 (단위어/접속어 제거)
+            _stop = {"minutes", "min", "time", "per", "param"}
+            _filter = {"minutes", "min", "time", "per", "param", "duty", "crew", "trip"}
+            _cp_keywords = {}
+            for _cid in _cp_params.keys():
+                _words = set(_cid.lower().split("_")) - _stop
+                if _words:
+                    _cp_keywords[_cid] = _words
+            _filtered = []
+            _removed = []
+            for _mp in _model_params:
+                _mid = (_mp.get("id") or "").lower()
+                # 정확 일치
+                if _mid in _cp_ids_lower:
+                    _removed.append(_mp.get("id", ""))
+                    continue
+                # 유사 일치: LLM 파라미터의 핵심 단어가 1계층 키워드를 모두 포함
+                _mid_words = set(_mid.split("_")) - _filter
+                _is_similar = False
+                for _cid, _cwords in _cp_keywords.items():
+                    if _cwords and _cwords.issubset(_mid_words):
+                        _removed.append(f"{_mp.get('id', '')} (similar to {_cid})")
+                        _is_similar = True
+                        break
+                if _is_similar:
+                    continue
+                _filtered.append(_mp)
+
+            
+            # 1계층 파라미터 주입
+            for _pid, _pval in _cp_params.items():
+                if isinstance(_pval, dict):
+                    _dv = _pval.get("default", _pval.get("value"))
+                else:
+                    _dv = _pval
+                try:
+                    _dv = float(_dv) if _dv is not None else None
+                except (ValueError, TypeError):
+                    pass
+                _filtered.append({
+                    "id": _pid,
+                    "name": _pid,
+                    "type": "scalar",
+                    "default_value": _dv,
+                    "source_file": "normalized/parameters.csv",
+                    "source_column": "value",
+                    "auto_injected": True,
+                    "layer": 1,
+                })
+            
+            model["parameters"] = _filtered
+
+            # ★ 제거된 파라미터의 id → 1계층 id 매핑으로 제약조건 내 참조 치환
+            _rename_map = {}
+            for _r in _removed:
+                # "old_id (similar to layer1_id)" 형태에서 추출
+                if "(similar to " in str(_r):
+                    _old = str(_r).split(" (similar to ")[0]
+                    _new = str(_r).split("(similar to ")[1].rstrip(")")
+                    _rename_map[_old] = _new
+                else:
+                    # 정확 일치는 이름이 같으므로 치환 불필요
+                    pass
+            
+            if _rename_map:
+                # 제약조건 내 param name 치환 (재귀적)
+                def _rename_params(node, rmap):
+                    if isinstance(node, dict):
+                        # param 노드의 name 치환
+                        if "param" in node and isinstance(node["param"], dict):
+                            pname = node["param"].get("name", "")
+                            if pname in rmap:
+                                node["param"]["name"] = rmap[pname]
+                        if "name" in node and node.get("name") in rmap:
+                            # var 노드가 아닌 경우만
+                            if "var" not in str(type(node)):
+                                pass
+                        # 모든 하위 노드 순회
+                        for k, v in node.items():
+                            _rename_params(v, rmap)
+                    elif isinstance(node, list):
+                        for item in node:
+                            _rename_params(item, rmap)
+                
+                for _con in model.get("constraints", []):
+                    _rename_params(_con, _rename_map)
+                    # expression 문자열도 치환
+                    if "expression" in _con and isinstance(_con["expression"], str):
+                        for _old_id, _new_id in _rename_map.items():
+                            _con["expression"] = _con["expression"].replace(_old_id, _new_id)
+                
+                # objective 내 참조도 치환
+                _obj = model.get("objective")
+                if _obj:
+                    _rename_params(_obj, _rename_map)
+                    if "expression" in _obj and isinstance(_obj["expression"], str):
+                        for _old_id, _new_id in _rename_map.items():
+                            _obj["expression"] = _obj["expression"].replace(_old_id, _new_id)
+                
+                logger.info(f"Param rename map applied: {_rename_map}")
+
+            logger.info(
+                f"Layer-1 inject: removed {len(_removed)} duplicates "
+                f"({_removed[:5]}), injected {len(_cp_params)} from confirmed_problem"
+            )
+
         validation = validate_model(model)
         
         # 검증 결과 로깅 추가
@@ -526,6 +820,159 @@ async def generate_math_model(
             "validation": None,
             "error": f"수학 모델 생성 중 오류: {str(e)}",
         }
+
+
+
+
+# ============================================================
+# 제약 수정 함수 (에러 제약만 재생성)
+# ============================================================
+async def repair_constraints(
+    model: Dict[str, Any],
+    error_constraints: List[Dict[str, Any]],
+    valid_constraint_names: List[str],
+) -> Dict[str, Any]:
+    """
+    에러가 있는 제약만 LLM에게 수정 요청.
+    전체 모델 컨텍스트(변수, 파라미터, 집합, 올바른 제약)를 제공하여
+    의존성을 유지하면서 수정.
+
+    Returns:
+        {
+            "success": bool,
+            "added_variables": [...],
+            "replaced_constraints": [...],
+            "added_constraints": [...],
+            "removed_constraints": [...],
+            "error": str or None
+        }
+    """
+    if not _model:
+        return {"success": False, "error": "LLM 모델이 초기화되지 않았습니다."}
+
+    try:
+        from utils.prompt_loader import load_yaml_prompt, get_constraint_schema_text
+
+        config = load_yaml_prompt("crew", "constraint_repair")
+        system = config.get("system", "")
+        rules = config.get("rules", [])
+        rules_text = "\n".join(f"  {i+1}. {r}" for i, r in enumerate(rules))
+
+        # 출력 스키마
+        output_schema = json.dumps({
+            "added_variables": [{"id": "str", "name": "str", "type": "binary|integer|continuous", "indices": ["SET_ID"], "description": "str"}],
+            "replaced_constraints": [{"name": "str", "description": "str", "for_each": "str", "lhs": {}, "operator": "str", "rhs": {}, "priority": "hard|soft", "expression": "str"}],
+            "added_constraints": [{"name": "str", "description": "str", "for_each": "str", "lhs": {}, "operator": "str", "rhs": {}, "priority": "hard|soft", "expression": "str"}],
+            "removed_constraints": ["constraint_name"]
+        }, ensure_ascii=False, indent=2)
+
+        constraint_schema = get_constraint_schema_text()
+
+        # 변수 목록 텍스트
+        variables_text = ""
+        for v in model.get("variables", []):
+            vid = v.get("id", "?")
+            vtype = v.get("type", "?")
+            indices = v.get("indices", [])
+            desc = v.get("description", "")
+            variables_text += f"- {vid} (type={vtype}, indices={indices}): {desc}\n"
+
+        # 파라미터 목록 텍스트
+        parameters_text = ""
+        for p in model.get("parameters", []):
+            pid = p.get("id", p.get("name", "?"))
+            ptype = p.get("type", "?")
+            src = p.get("source_file", "")
+            col = p.get("source_column", "")
+            dv = p.get("default_value", "없음")
+            parameters_text += f"- {pid} (type={ptype}, source={src}::{col}, default={dv})\n"
+
+        # 집합 목록 텍스트
+        sets_text = ""
+        for s in model.get("sets", []):
+            sid = s.get("id", "?")
+            sname = s.get("name", "?")
+            src_type = s.get("source_type", "column")
+            size = s.get("size", "?")
+            sets_text += f"- {sid} ({sname}): source_type={src_type}, size={size}\n"
+
+        # 올바른 제약 텍스트
+        valid_constraints_text = ""
+        for c in model.get("constraints", []):
+            if c.get("name") in valid_constraint_names:
+                valid_constraints_text += f"- {c.get('name')}: {c.get('description', '')}\n"
+                valid_constraints_text += f"  expression: {c.get('expression', 'N/A')}\n"
+
+        # 에러 제약 텍스트
+        error_constraints_text = ""
+        for ec in error_constraints:
+            cname = ec.get("name", "?")
+            reason = ec.get("error_reason", "불명")
+            desc = ec.get("description", "")
+            expr = ec.get("expression", "N/A")
+            error_constraints_text += f"- {cname}: {desc}\n"
+            error_constraints_text += f"  현재 expression: {expr}\n"
+            error_constraints_text += f"  에러 사유: {reason}\n\n"
+
+        # 프롬프트 조립
+        prompt = f"""{system}
+
+중요 규칙:
+{rules_text}
+
+출력 JSON 스키마:
+{output_schema}
+
+제약조건 작성 형식:
+{constraint_schema}
+
+=== 현재 모델 컨텍스트 ===
+
+[변수 목록]
+{variables_text}
+
+[파라미터 목록]
+{parameters_text}
+
+[집합 목록]
+{sets_text}
+
+[올바른 제약 (수정 금지)]
+{valid_constraints_text}
+
+=== 수정 대상 ===
+
+[에러 제약과 에러 사유]
+{error_constraints_text}
+
+위 에러 제약을 수정하여 JSON으로 출력하세요."""
+
+        logger.info(f"Repair prompt length: {len(prompt)} chars, error constraints: {len(error_constraints)}")
+
+        response = await asyncio.to_thread(
+            _model.generate_content, prompt
+        )
+
+        raw_text = response.text.strip()
+        logger.info(f"Repair response length: {len(raw_text)}")
+
+        # JSON 파싱
+        result = _parse_model_json(raw_text)
+        if not result:
+            return {"success": False, "error": "수정 응답에서 유효한 JSON을 추출할 수 없습니다."}
+
+        return {
+            "success": True,
+            "added_variables": result.get("added_variables", []),
+            "replaced_constraints": result.get("replaced_constraints", []),
+            "added_constraints": result.get("added_constraints", []),
+            "removed_constraints": result.get("removed_constraints", []),
+            "error": None,
+        }
+
+    except Exception as e:
+        logger.error(f"Constraint repair failed: {e}", exc_info=True)
+        return {"success": False, "error": f"제약 수정 중 오류: {str(e)}"}
 
 
 # ============================================================

@@ -24,7 +24,7 @@ def load_prompt(domain: str, filename: str) -> str:
 
 @lru_cache()
 def load_yaml_prompt(domain: str, filename: str) -> Dict[str, Any]:
-    file_path = os.path.join(PROMPT_DIR, domain, f"{filename}.yaml")
+    file_path = os.path.join(PROMPT_DIR, f"{filename}.yaml")
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
@@ -38,7 +38,7 @@ def load_yaml_prompt(domain: str, filename: str) -> Dict[str, Any]:
 
 @lru_cache()
 def load_schema(filename: str) -> Dict[str, Any]:
-    file_path = os.path.join(PROMPT_DIR, "schemas", f"{filename}.yaml")
+    file_path = os.path.join(BASE_DIR, "schemas", f"{filename}.yaml")
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}

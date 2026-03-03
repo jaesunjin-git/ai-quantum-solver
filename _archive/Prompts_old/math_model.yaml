@@ -18,6 +18,9 @@ rules:
 - 데이터에 개별 항목 목록이 없고 총 개수만 있으면 source_type을 "range"로 설정하라. 예: 승무원 96명이면 source_file/source_column 대신 {"id":"J","name":"승무원","source_type":"range","size":96}로 작성하라.
 - 'source_type 옵션: (1) 생략 또는 "column" = source_file+source_column에서 고유값 추출, (2) "range" = 1부터 size까지 정수 집합 자동 생성, (3) "explicit" = values 배열에 직접 나열.'
 - operator는 반드시 비교연산자(==, <=, >=, <, >, !=)만 사용하라. 곱셈(*)이나 덧셈(+)은 operator가 아니라 lhs 또는 rhs 노드 안의 multiply/add로 표현하라.
+- '★ 단위 통일 규칙: 모든 시간 관련 파라미터의 value는 반드시 "분(minutes)" 단위로 작성하라. 데이터 파일의 시간 컬럼도 분 단위로 변환된다. 예: 11시간 = 660, 40분 = 40, 5시간 = 300. 시간(hour) 단위를 절대 사용하지 마라.'
+- '★ value 필드 규칙: parameter의 value에는 데이터 파일에서 가져올 수 없는 상수만 넣어라. 데이터 파일에서 가져오는 값은 source_file/source_column을 사용하고 value는 비워두라.'
+- '★ 금지 패턴: (1) binary 변수(0/1)를 시간 상수와 직접 비교 금지 (x[i,j] >= 360 금지). (2) soft 제약에 x[i,j] <= 1 같은 무의미한 식 금지. (3) 열차 단위(i)와 승무원 단위(j) 혼동 금지.'
 - 'x[j,i] * param 같은 곱셈 표현식은 제약이 아니다. 반드시 비교연산자가 포함된 완전한 제약을 작성하라. 예: sum(param[i] * x[j,i] for i in I) <= max_value.'
 template: '{system}
 

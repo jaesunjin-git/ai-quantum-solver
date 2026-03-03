@@ -13,6 +13,16 @@ analysis:
   - analyze
 
 # STEP 1 변형: 분석 결과 재확인
+problem_definition:
+  - "문제 정의"
+  - "문제정의"
+  - "problem definition"
+  - "문제 유형"
+  - "어떤 문제"
+  - "최적화 문제 정의"
+  - "what to optimize"
+  - "문제를 정의"
+
 analysis_result:
   - 분석 결과
   - 리포트 다시

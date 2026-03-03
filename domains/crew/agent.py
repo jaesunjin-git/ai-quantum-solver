@@ -52,6 +52,8 @@ from domains.crew.classifier import (
 )
 
 # skills/ 패키지에서 분리된 스킬 함수 (Step 4 리팩토링)
+from domains.crew.skills.problem_definition import skill_problem_definition
+from domains.crew.skills.data_normalization import skill_data_normalization
 from domains.crew.skills.analyze import skill_analyze, skill_show_analysis
 from domains.crew.skills.general import skill_answer, skill_general, skill_ask_for_data
 from domains.crew.skills.math_model import skill_math_model, skill_show_math_model, handle_math_model_confirm
@@ -81,7 +83,7 @@ class CrewAgent:
             self.model = None
 
     def _load_system_prompt(self) -> str:
-        path = Path(__file__).parents[2] / "Prompts" / "crew" / "system.md"
+        path = Path(__file__).parents[2] / "prompts" / "system.md"
         try:
             return path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -149,6 +151,23 @@ class CrewAgent:
                 return await self._execute_skill(session, project_id, quick_intent, message, {})
 
             # ── 2차: LLM 스킬 선택 ──
+            # ★ Phase1: 분석 미완료 시 모델 생성 차단
+            if not session.state.analysis_completed:
+                logger.info(f"[{project_id}] Analysis not completed — redirecting to ANALYZE")
+                return await self._execute_skill(session, project_id, "ANALYZE", message, {})
+
+            # ★ Phase1.5: 분석 완료 but 문제 미정의 시 문제정의로 리다이렉트
+            if session.state.analysis_completed and not session.state.problem_defined:
+                logger.info(f"[{project_id}] Problem not defined — redirecting to PROBLEM_DEFINITION")
+                return await self._execute_skill(session, project_id, "PROBLEM_DEFINITION", message, {})
+
+            # ★ Phase2: 문제 정의 완료 but 데이터 미정규화 시
+            if session.state.problem_defined and not session.state.data_normalized:
+                logger.info(f"[{project_id}] Data not normalized — redirecting to DATA_NORMALIZATION")
+                return await self._execute_skill(session, project_id, "DATA_NORMALIZATION", message, {})
+
+
+
             logger.info(f"[{project_id}] → LLM skill selection")
             session.history.append({"role": "user", "content": message})
             return await self._llm_select_and_execute(session, project_id, message, current_tab)
@@ -220,6 +239,8 @@ class CrewAgent:
                 "AnswerQuestionSkill": "ANSWER",
                 "GeneralReplySkill": "GENERAL",
                 "AnalyzeDataSkill": "ANALYZE",
+                "ProblemDefinitionSkill": "PROBLEM_DEFINITION",
+                "DataNormalizationSkill": "DATA_NORMALIZATION",
                 "PreDecisionSkill": "PRE_DECISION",
                 "MathModelSkill": "MATH_MODEL",
                 "StartOptimizationSkill": "START_OPTIMIZATION",
@@ -307,6 +328,8 @@ class CrewAgent:
         """intent에 따라 해당 Skill 핸들러를 실행"""
         handlers = {
             "ANALYZE": lambda s, p, m, pr: skill_analyze(self.model, s, p, m, pr),
+            "PROBLEM_DEFINITION": lambda s, p, m, pr: skill_problem_definition(self.model, s, p, m, pr),
+            "DATA_NORMALIZATION": lambda s, p, m, pr: skill_data_normalization(self.model, s, p, m, pr),
             "SHOW_ANALYSIS": skill_show_analysis,
             "PRE_DECISION": skill_pre_decision,
             "SHOW_MATH_MODEL": skill_show_math_model,
@@ -327,6 +350,8 @@ class CrewAgent:
         # Action intent 처리 후 target_tab 추가 (프론트엔드 자동 탭 전환용)
         intent_to_tab = {
             "ANALYZE": "analysis",
+            "PROBLEM_DEFINITION": "analysis",
+            "DATA_NORMALIZATION": "analysis",
             "SHOW_ANALYSIS": "analysis",
             "MATH_MODEL": "math_model",
             "SHOW_MATH_MODEL": "math_model",

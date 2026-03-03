@@ -66,6 +66,25 @@ class DataBinder:
             logger.warning(f"Upload dir not found: {self.upload_dir}")
             return
 
+        # ★ 정규화 완료 시 normalized/ 만 로드 (원본 스킵)
+        norm_dir = self.upload_dir / "normalized"
+        if norm_dir.exists() and norm_dir.is_dir() and any(norm_dir.iterdir()):
+            logger.info(f"Normalized data found — loading ONLY normalized/ files")
+            for nf in norm_dir.iterdir():
+                nfname = nf.name.lower()
+                if nfname.endswith(".csv"):
+                    try:
+                        ndf = pd.read_csv(nf, encoding="utf-8")
+                        self._dataframes[f"normalized/{nf.name}"] = ndf
+                        logger.info(f"Loaded normalized: {nf.name} ({len(ndf)} rows, {len(ndf.columns)} cols)")
+                    except Exception as ne:
+                        logger.warning(f"Failed to load normalized {nf.name}: {ne}")
+            self._loaded = True
+            logger.info(f"DataBinder loaded {len(self._dataframes)} dataframes (normalized only)")
+            return
+
+
+        
         for fpath in self.upload_dir.iterdir():
             fname = fpath.name.lower()
             try:
@@ -94,6 +113,25 @@ class DataBinder:
 
         # ★ 비정형 블록 구조 자동 파싱
         self._parse_non_tabular_sheets()
+
+
+        # ★ 정규화 데이터 우선 로드
+        norm_dir = self.upload_dir / "normalized"
+        if norm_dir.exists() and norm_dir.is_dir():
+            _norm_count = 0
+            for nf in norm_dir.iterdir():
+                nfname = nf.name.lower()
+                if nfname.endswith(".csv"):
+                    try:
+                        ndf = pd.read_csv(nf, encoding="utf-8")
+                        norm_key = f"normalized/{nf.name}"
+                        self._dataframes[norm_key] = ndf
+                        _norm_count += 1
+                        logger.info(f"Loaded normalized: {nf.name} ({len(ndf)} rows, {len(ndf.columns)} cols)")
+                    except Exception as ne:
+                        logger.warning(f"Failed to load normalized {nf.name}: {ne}")
+            if _norm_count > 0:
+                logger.info(f"Loaded {_norm_count} normalized files (these take priority in data_guide)")
 
         self._loaded = True
         logger.info(f"DataBinder loaded {len(self._dataframes)} dataframes")
@@ -265,29 +303,40 @@ class DataBinder:
 
     def get_parameter_values(self, param_def: Dict) -> Any:
         """IR의 parameter 정의에서 실제 값을 추출"""
-        # 고정 상수인 경우
-        if param_def.get("value") is not None:
-            return param_def["value"]
+        import logging
+        _logger = logging.getLogger(__name__)
 
+        # 1) default_value가 있으면 최우선 사용 (사용자 입력값)
+        default_val = param_def.get("default_value")
+
+        # 2) 데이터 소스에서 가져오기 시도
         source_file = param_def.get("source_file", "")
         source_col = param_def.get("source_column", "")
 
-        if not source_file or not source_col:
-            return None
+        if source_file and source_col:
+            df = self.get_dataframe(source_file)
+            if df is not None:
+                if source_col not in df.columns:
+                    for col in df.columns:
+                        if col.strip().lower() == source_col.strip().lower():
+                            source_col = col
+                            break
+                    else:
+                        _logger.warning(f"Parameter '{param_def.get('id')}': column '{source_col}' not found in {source_file}")
+                        # 소스 실패 시 default_value 또는 value 사용
+                        if default_val is not None:
+                            return default_val
+                        if param_def.get("value") is not None:
+                            return param_def["value"]
+                        return None
+                return df[source_col].tolist()
 
-        df = self.get_dataframe(source_file)
-        if df is None:
-            return None
-
-        if source_col not in df.columns:
-            for col in df.columns:
-                if col.strip().lower() == source_col.strip().lower():
-                    source_col = col
-                    break
-            else:
-                return None
-
-        return df[source_col].tolist()
+        # 3) 소스가 없을 때: default_value > value 순서로 반환
+        if default_val is not None:
+            return default_val
+        if param_def.get("value") is not None:
+            return param_def["value"]
+        return None
 
     @staticmethod
     def _convert_time_values(values):

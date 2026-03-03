@@ -1,0 +1,69 @@
+# AI Quantum Solver - Data-to-Problem Matching Rules
+# Version: 1.0
+
+version: "1.0"
+
+rules:
+  duty_gen_standard:
+    required_data:
+      - timetable
+      - work_regulations
+    optional_data:
+      - existing_duty
+    recommended_stage: task_generation
+    base_confidence: 0.80
+    boost_conditions:
+      - condition: "existing_duty detected"
+        boost: 0.10
+        reason: "기존 DIA가 있으면 듀티 재생성 가능성 높음"
+      - condition: "trip_count >= 50"
+        boost: 0.05
+        reason: "대규모 운행은 최적화 필요성 높음"
+
+  roster_standard:
+    required_data:
+      - duty_set_or_shift_set
+      - crew_info
+      - work_regulations
+    optional_data:
+      - preference_data
+    recommended_stage: roster_assignment
+    base_confidence: 0.75
+    boost_conditions:
+      - condition: "crew_count >= 20"
+        boost: 0.10
+      - condition: "preference_data detected"
+        boost: 0.05
+
+  shift_sched_standard:
+    required_data:
+      - duty_set
+      - work_regulations
+    optional_data:
+      - demand_profile
+    recommended_stage: shift_scheduling
+    base_confidence: 0.70
+    boost_conditions:
+      - condition: "demand_profile detected"
+        boost: 0.15
+
+  integrated_standard:
+    required_data:
+      - timetable
+      - work_regulations
+      - crew_info
+    optional_data:
+      - existing_duty
+      - demand_profile
+    recommended_stage: integrated
+    base_confidence: 0.65
+    boost_conditions:
+      - condition: "all five data types detected"
+        boost: 0.20
+
+  rescheduling:
+    required_data:
+      - current_schedule
+      - disruption_info
+    recommended_stage: realtime_rescheduling
+    base_confidence: 0.85

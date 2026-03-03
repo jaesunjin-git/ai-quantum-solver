@@ -1,0 +1,103 @@
+# AI Quantum Solver - Data Normalization Prompt
+# Version: 1.0
+# Used by: DataNormalizationSkill
+
+version: "1.0"
+
+system_prompt: |
+  You are a data transformation expert for optimization problems.
+  Analyze the given problem definition and data structure,
+  then generate mapping rules to create normalized tables
+  that a mathematical model can directly use.
+
+  You must respond in pure JSON only. No markdown, no explanation.
+
+rules:
+  - "Each mapping must include confidence (0.0 to 1.0)."
+  - "Do NOT guess values that are not in the data."
+  - "For pivot-style data (station names as columns), suggest unpivot transform."
+  - "For non-tabular block structures, suggest parse_blocks transform."
+  - "If a mapping is uncertain, set confidence below 0.3."
+  - "Time values should be converted to minutes from midnight."
+  - "Use the confirmed problem definition to determine which tables are needed."
+
+output_schema: |
+  {
+    "mappings": [
+      {
+        "target_table": "trips | parameters | existing_duties",
+        "source_file": "filename.xlsx",
+        "source_sheet": "SheetName",
+        "transform_type": "unpivot | direct | parse_blocks | extract_kv | from_confirmed",
+        "confidence": 0.0,
+        "reason": "explanation of why this mapping was chosen",
+        "column_mapping": {
+          "target_col": "source_col or transform rule"
+        },
+        "notes": "any additional transformation notes"
+      }
+    ]
+  }
+
+required_tables:
+  task_generation:
+    trips:
+      columns:
+        - trip_id
+        - direction
+        - dep_station
+        - arr_station
+        - dep_time_min
+        - arr_time_min
+      description: "Trip list. Times in minutes from midnight."
+      required: true
+    parameters:
+      columns:
+        - param_name
+        - value
+        - unit
+      description: "Constraint parameter values."
+      required: true
+    existing_duties:
+      columns:
+        - duty_id
+        - trip_ids
+        - start_time_min
+        - end_time_min
+        - duty_type
+      description: "Existing DIA duties for comparison."
+      required: false
+
+  roster_assignment:
+    duties:
+      columns:
+        - duty_id
+        - start_time_min
+        - end_time_min
+        - duty_type
+      description: "Duty list to assign to crew."
+      required: true
+    crew:
+      columns:
+        - crew_id
+        - qualification
+        - depot
+      description: "Crew member information."
+      required: true
+    parameters:
+      columns:
+        - param_name
+        - value
+        - unit
+      description: "Constraint parameter values."
+      required: true
+
+confidence_threshold: 0.8
+
+confirmation_keywords:
+  positive: ["confirm", "ok", "yes", "approve",
+              "확인", "네", "좋습니다", "승인", "진행"]
+  modify: ["modify", "change", "adjust",
+           "수정", "변경", "조정"]
+  restart: ["restart", "reset", "다시",
+            "재시작", "처음부터"]

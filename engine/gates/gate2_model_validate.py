@@ -14,6 +14,7 @@ LLM 호출 없이 규칙 기반으로 동작한다.
 """
 
 import logging
+from utils.prompt_loader import build_prompt_from_yaml
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,9 +23,286 @@ logger = logging.getLogger(__name__)
 VALID_OPERATORS = {"==", "<=", ">=", "<", ">", "!="}
 
 
+
+
+# ──────────────────────────────────────────────
+# 범용 파라미터 자동 바인딩 (도메인 무관)
+# ──────────────────────────────────────────────
+
+def _parse_value_string(s):
+    """문자열에서 숫자 값 추출 (범용). 예: '40분'->40, '3시간'->180, '225:33'->225.55"""
+    if s is None:
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+
+    import re
+
+    # 시간:분 형태 (예: 225:33, 157:58)
+    m = re.match(r"^(\d+):(\d+)$", s)
+    if m:
+        return round(int(m.group(1)) + int(m.group(2)) / 60, 2)
+
+    # N시간 (예: 3시간 -> 180분)
+    m = re.match(r"^(\d+\.?\d*)\s*시간$", s)
+    if m:
+        return round(float(m.group(1)) * 60, 2)
+
+    # N분 (예: 40분 -> 40)
+    m = re.match(r"^(\d+\.?\d*)\s*분$", s)
+    if m:
+        return float(m.group(1))
+
+    # N회, N개사업 등 (숫자만 추출)
+    m = re.match(r"^(\d+\.?\d*)\s*[회개명건]", s)
+    if m:
+        return float(m.group(1))
+
+    # 순수 숫자
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _tokenize_korean(text):
+    """한국어 텍스트를 키워드 토큰으로 분리 (범용)"""
+    import re
+    text = str(text).lower().strip()
+    text = re.sub(r"[_\-\s]+", " ", text)
+    # 한국어: 조사/어미 간단 제거
+    tokens = re.split(r"[\s_\-/()（）\[\]]+", text)
+    tokens = [t for t in tokens if len(t) > 0]
+    return set(tokens)
+
+
+def _token_similarity(a, b):
+    """두 텍스트의 토큰 유사도 (Jaccard)"""
+    ta = _tokenize_korean(a)
+    tb = _tokenize_korean(b)
+    if not ta or not tb:
+        return 0.0
+    intersection = ta & tb
+    union = ta | tb
+    return len(intersection) / len(union) if union else 0.0
+
+
+def _extract_kv_entries(dataframes):
+    """모든 dataframe에서 key-value 쌍 추출 (범용).
+    2~3열, <30행인 시트에서 첫 열=키, 나머지=값으로 취급.
+    반환: [(sheet_key, key_text, value_text, parsed_number), ...]
+    """
+    entries = []
+    if not dataframes:
+        return entries
+
+    for sheet_key, df in dataframes.items():
+        # DIA 블록 데이터 제외
+        if "__DIA " in sheet_key or "__Block " in sheet_key:
+            continue
+        # key-value 시트 조건: 열 2~3개, 행 30개 미만
+        if not (2 <= len(df.columns) <= 3 and len(df) < 30):
+            continue
+
+        for _, row in df.iterrows():
+            key_val = str(row.iloc[0]).strip() if row.iloc[0] is not None else ""
+            if not key_val or key_val == "nan":
+                continue
+
+            # 2열 시트: 값은 두 번째 열
+            if len(df.columns) == 2:
+                raw_val = row.iloc[1]
+                parsed = _parse_value_string(raw_val)
+                entries.append((sheet_key, key_val, str(raw_val), parsed))
+            # 3열 시트: 세부+시간 등 → 키를 "항목_세부"로 조합
+                # 값은 세 번째 열
+            elif len(df.columns) == 3:
+                detail = str(row.iloc[1]).strip() if row.iloc[1] is not None else ""
+                combined_key = f"{key_val} {detail}".strip()
+                raw_val = row.iloc[2]
+                parsed = _parse_value_string(raw_val)
+                entries.append((sheet_key, combined_key, str(raw_val), parsed))
+                # 항목만으로도 매칭 가능하게
+                entries.append((sheet_key, key_val, str(raw_val), parsed))
+
+    return entries
+
+
+def _extract_summary_stats(dataframes):
+    """__summary 테이블에서 통계값 추출 (범용).
+    반환: [(sheet_key, col_name, stat_type, value), ...]
+    """
+    stats = []
+    if not dataframes:
+        return stats
+
+    for sheet_key, df in dataframes.items():
+        if "__summary" not in sheet_key:
+            continue
+        for col in df.columns:
+            if df[col].dtype in ("int64", "float64"):
+                vals = df[col].dropna()
+                if len(vals) == 0:
+                    continue
+                stats.append((sheet_key, col, "min", float(vals.min())))
+                stats.append((sheet_key, col, "max", float(vals.max())))
+                stats.append((sheet_key, col, "mean", round(float(vals.mean()), 2)))
+    return stats
+
+
+
+def _build_bind_prompt(unbound_params, kv_entries, summary_stats):
+    """프롬프트 파일(parameter_bind.yaml)에서 템플릿을 로드하여 바인딩 프롬프트 생성"""
+    from utils.prompt_loader import load_yaml_prompt
+
+    config = load_yaml_prompt("crew", "parameter_bind")
+
+    # system, rules, schema 조립
+    system = config.get("system", "")
+    rules = config.get("rules", [])
+    rules_text = "\n".join(f"  {i+1}. {r}" for i, r in enumerate(rules))
+    schema = config.get("schema", "")
+
+    # 데이터 변수 준비
+    params_text = "\n".join(f"- {p}" for p in unbound_params)
+
+    seen = set()
+    kv_lines = []
+    for sheet, key, raw, parsed in kv_entries:
+        if parsed is None:
+            continue
+        entry_key = f"{key}={parsed}"
+        if entry_key in seen:
+            continue
+        seen.add(entry_key)
+        kv_lines.append(f"- [{sheet}] {key} = {raw} (숫자값: {parsed})")
+    kv_text = "\n".join(kv_lines) if kv_lines else "(없음)"
+
+    summary_lines = []
+    for sheet, col, stype, val in summary_stats:
+        summary_lines.append(f"- [{sheet}] {col}.{stype} = {val}")
+    summary_text = "\n".join(summary_lines) if summary_lines else "(없음)"
+
+    # 템플릿 조립 + 변수 치환
+    template = config.get("template", "")
+    if not template:
+        template = "{system}\n\n{rules_text}\n\n{unbound_params}\n\n{kv_data}\n\n{summary_data}"
+
+    prompt = template
+    for key, value in {
+        "system": system,
+        "rules_text": rules_text,
+        "schema": schema,
+        "unbound_params": params_text,
+        "kv_data": kv_text,
+        "summary_data": summary_text,
+    }.items():
+        prompt = prompt.replace("{" + key + "}", str(value))
+
+    return prompt
+
+def auto_bind_unbound_parameters(model, dataframes):
+    """
+    범용 자동 바인딩 (LLM 기반, 동기):
+    1) KV 엔트리 + Summary 통계 수집
+    2) LLM에게 매칭 요청
+    3) 매칭 결과 적용, 실패 시 user_input_required 마킹
+    """
+    import json as json_mod
+    import re
+    import logging
+    logger = logging.getLogger(__name__)
+
+    corrections = []
+    still_unbound = []
+
+    # unbound 파라미터 수집
+    unbound_params = []
+    for p in model.get("parameters", []):
+        pid = p.get("id", p.get("name", ""))
+        sf = p.get("source_file") or ""
+        sc = p.get("source_column") or ""
+        dv = p.get("default_value", p.get("default"))
+        if not sf and not sc and dv is None:
+            unbound_params.append(pid)
+
+    if not unbound_params:
+        return corrections, still_unbound
+
+    kv_entries = _extract_kv_entries(dataframes)
+    summary_stats = _extract_summary_stats(dataframes)
+
+    try:
+        import google.generativeai as genai
+        from core.config import settings
+
+        genai.configure(api_key=settings.GOOGLE_API_KEY)
+        bind_model = genai.GenerativeModel(
+            settings.MODEL_ANALYSIS,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.0,
+                max_output_tokens=4096,
+            ),
+        )
+
+        prompt = _build_bind_prompt(unbound_params, kv_entries, summary_stats)
+        logger.info(f"Auto-bind LLM prompt length: {len(prompt)}")
+
+        response = bind_model.generate_content(prompt)
+        raw = response.text.strip()
+        logger.info(f"Auto-bind LLM response length: {len(raw)}")
+        logger.debug(f"Auto-bind LLM response: {raw[:500]}")
+
+        # JSON 파싱
+        json_match = re.search(r"\{[\s\S]*\}", raw)
+        if json_match:
+            result = json_mod.loads(json_match.group())
+        else:
+            logger.warning("Auto-bind: LLM 응답에서 JSON을 찾을 수 없음")
+            result = {"bindings": []}
+
+        # 결과 적용
+        param_map = {p.get("id", p.get("name", "")): p for p in model.get("parameters", [])}
+        bound_ids = set()
+
+        for binding in result.get("bindings", []):
+            pid = binding.get("parameter", "")
+            value = binding.get("value")
+            source = binding.get("source", "")
+            reasoning = binding.get("reasoning", "")
+
+            if pid in param_map and value is not None:
+                param_map[pid]["default_value"] = value
+                param_map[pid]["auto_bound"] = True
+                param_map[pid]["auto_bound_source"] = source
+                param_map[pid]["auto_bound_reasoning"] = reasoning
+                corrections.append(
+                    f"Parameter '{pid}' -> {value} "
+                    f"(source: {source}, reason: {reasoning})"
+                )
+                bound_ids.add(pid)
+
+        for pid in unbound_params:
+            if pid not in bound_ids:
+                if pid in param_map:
+                    param_map[pid]["user_input_required"] = True
+                still_unbound.append(pid)
+
+    except Exception as e:
+        logger.error(f"Auto-bind LLM 호출 실패: {e}", exc_info=True)
+        param_map = {p.get("id", p.get("name", "")): p for p in model.get("parameters", [])}
+        for pid in unbound_params:
+            if pid in param_map:
+                param_map[pid]["user_input_required"] = True
+            still_unbound.append(pid)
+
+    return corrections, still_unbound
+
 def run(math_model: Dict,
         data_profile: Optional[Dict] = None,
-        dataframes: Optional[Dict] = None) -> Dict[str, Any]:
+        dataframes: Optional[Dict] = None,
+         confirmed_problem: Optional[Dict] = None) -> Dict[str, Any]:
     """
     메인 검증 함수.
 
@@ -180,6 +458,397 @@ def run(math_model: Dict,
                     )
 
     # ── 5. 결과 요약 ──
+
+    # ── 추가 검증: 제약 구조 심층 분석 ──
+    set_ids = {s.get("id", s.get("name", "")): s for s in sets}
+    
+    for con in constraints:
+        cname = con.get("name", "unknown")
+        for_each = con.get("for_each", "") or ""
+        lhs = con.get("lhs", {}) or {}
+        
+        # 검증1: for_each와 sum.over가 동일 인덱스 → 의미 없는 이중 루프
+        if for_each and isinstance(lhs, dict) and "sum" in lhs:
+            sum_node = lhs.get("sum", {})
+            if not isinstance(sum_node, dict):
+                continue
+            sum_over = sum_node.get("over", "") or ""
+            # for_each에서 인덱스 추출
+            import re as _re
+            fe_indices = set(_re.findall(r'(\w+)\s+in\s+(\w+)', for_each))
+            ov_indices = set(_re.findall(r'(\w+)\s+in\s+(\w+)', sum_over))
+            
+            # 동일 set으로 for_each와 over를 모두 사용하는 경우
+            fe_sets = {s for _, s in fe_indices}
+            ov_sets = {s for _, s in ov_indices}
+            overlap = fe_sets & ov_sets
+            if overlap:
+                errors.append(
+                    f"Constraint '{cname}': for_each와 sum.over가 동일 set {overlap}을 사용 → "
+                    f"O(n²) 폭발. for_each의 인덱스 변수와 sum의 인덱스 변수를 분리해야 함"
+                )
+        
+        # 검증2: sum의 coeff에 param이 있는데 해당 param의 source_file이 비정형 원본인 경우
+        if isinstance(lhs, dict) and "sum" in lhs:
+            coeff = lhs["sum"].get("coeff")
+            if isinstance(coeff, dict) and "param" in coeff:
+                param_ref = coeff["param"]
+                pname = param_ref if isinstance(param_ref, str) else param_ref.get("name", "")
+                # 해당 파라미터의 source 확인
+                for p in parameters:
+                    if p.get("name") == pname:
+                        src_col = p.get("source_column", "") or ""
+                        if src_col.startswith("Unnamed"):
+                            errors.append(
+                                f"Constraint '{cname}': coeff param '{pname}'이 "
+                                f"비정형 컬럼 '{src_col}'에 매핑됨 → 데이터 바인딩 실패 예상"
+                            )
+                        break
+    
+    # 검증3: source_file이 없는 파라미터 중 default도 없는 것
+    unbound_params = []
+    for p in parameters:
+        pname = p.get("name", "")
+        src_file = p.get("source_file") or ""
+        src_col = p.get("source_column") or ""
+        default_val = p.get("default_value", p.get("default"))
+        
+        if not src_file and not src_col and default_val is None:
+            unbound_params.append(pname)
+    
+    # --- 정규화 파라미터에서 직접 바인딩 ---
+    if dataframes:
+        _norm_params_df = None
+        for _dk, _dv in dataframes.items():
+            if _dk.startswith("normalized/") and "param_name" in _dv.columns and "value" in _dv.columns:
+                _norm_params_df = _dv
+                break
+
+        if _norm_params_df is not None:
+            _available = {}
+            for _, _row in _norm_params_df.iterrows():
+                _pn = str(_row["param_name"]).strip()
+                _pv = _row["value"]
+                _available[_pn] = _pv
+                _available[_pn.lower()] = _pv
+
+            # 모델 파라미터에서 id, name 모두 수집하여 매핑 테이블 구축
+            _all_model_params = math_model.get("parameters", [])
+            _bound_count = 0
+
+            for p in _all_model_params:
+                pid = p.get("id", "")
+                pname = p.get("name", "")
+                sf = p.get("source_file") or ""
+                dv = p.get("default_value", p.get("default"))
+
+                # 이미 바인딩된 파라미터는 스킵
+                if (sf and sf != "None") or dv is not None:
+                    continue
+
+                # 매칭 시도: id -> name -> id.lower -> name.lower
+                matched_val = None
+                matched_key = None
+                for candidate in [pid, pname, pid.lower(), pname.lower()]:
+                    if candidate and candidate in _available:
+                        matched_val = _available[candidate]
+                        matched_key = candidate
+                        break
+
+                if matched_val is not None:
+                    try:
+                        p["default_value"] = float(matched_val)
+                    except (ValueError, TypeError):
+                        p["default_value"] = matched_val
+                    p["auto_bound"] = True
+                    p["auto_bound_source"] = "normalized/parameters.csv"
+                    if "user_input_required" in p:
+                        del p["user_input_required"]
+                    corrections.setdefault("direct_bind", []).append(
+                        f"{pid or pname} = {matched_val} (matched via '{matched_key}')"
+                    )
+                    _bound_count += 1
+                    logger.info(f"Direct-bind: {pid or pname} = {matched_val} (key='{matched_key}')")
+
+            logger.info(f"Direct-bind complete: {_bound_count} params bound from normalized/parameters.csv")
+
+            # unbound_params 재계산 (검증3 결과 갱신)
+            unbound_params = []
+            for p in _all_model_params:
+                pname = p.get("name", p.get("id", ""))
+                sf = p.get("source_file") or ""
+                sc = p.get("source_column") or ""
+                dv = p.get("default_value", p.get("default"))
+                if not sf and not sc and dv is None:
+                    unbound_params.append(pname)
+            logger.info(f"Direct-bind: {len(unbound_params)} params still unbound: {unbound_params}")
+
+
+    # --- confirmed_problem 기반 fallback 매핑 ---
+    if unbound_params and confirmed_problem:
+        _cp_params = confirmed_problem.get("parameters", {})
+        if isinstance(_cp_params, dict) and _cp_params:
+            # confirmed_problem param key -> value 맵
+            _cp_map = {}
+            for _cpk, _cpv in _cp_params.items():
+                _val = _cpv.get("value") if isinstance(_cpv, dict) else _cpv
+                _cp_map[_cpk] = _val
+                _cp_map[_cpk.lower()] = _val
+
+            _all_model_params2 = math_model.get("parameters", [])
+            _cp_bound = 0
+            for p in _all_model_params2:
+                pid = p.get("id", "")
+                pname = p.get("name", "")
+                dv = p.get("default_value", p.get("default"))
+                sf = p.get("source_file") or ""
+
+                if (sf and sf != "None") or dv is not None:
+                    continue
+
+                # pid/pname으로 confirmed_problem 매칭
+                matched_val = None
+                matched_via = None
+                for candidate in [pid, pname, pid.lower(), pname.lower()]:
+                    if candidate and candidate in _cp_map:
+                        matched_val = _cp_map[candidate]
+                        matched_via = candidate
+                        break
+
+                if matched_val is not None:
+                    try:
+                        p["default_value"] = float(matched_val)
+                    except (ValueError, TypeError):
+                        p["default_value"] = matched_val
+                    p["auto_bound"] = True
+                    p["auto_bound_source"] = "confirmed_problem"
+                    if "user_input_required" in p:
+                        del p["user_input_required"]
+                    corrections.setdefault("cp_bind", []).append(
+                        f"{pid or pname} = {matched_val} (from confirmed_problem via '{matched_via}')"
+                    )
+                    _cp_bound += 1
+                    logger.info(f"CP-bind: {pid or pname} = {matched_val} (via '{matched_via}')")
+
+            # unbound 재계산
+            unbound_params = []
+            for p in _all_model_params2:
+                pn = p.get("name", p.get("id", ""))
+                sf2 = p.get("source_file") or ""
+                sc2 = p.get("source_column") or ""
+                dv2 = p.get("default_value", p.get("default"))
+                if not sf2 and not sc2 and dv2 is None:
+                    unbound_params.append(pn)
+            logger.info(f"CP-bind: {_cp_bound} bound, {len(unbound_params)} still unbound: {unbound_params}")
+
+    # --- 범용 자동 바인딩 시도 ---
+    if unbound_params and dataframes:
+        auto_corrections, remaining_unbound = auto_bind_unbound_parameters(
+            math_model, dataframes
+        )
+        if auto_corrections:
+            corrections["auto_bind"] = auto_corrections
+        if remaining_unbound:
+            warnings.append(
+                f"자동 바인딩 실패 파라미터 {len(remaining_unbound)}개 "
+                f"(user_input_required로 마킹됨): {remaining_unbound[:5]}"
+            )
+        unbound_params = remaining_unbound  # 갱신
+
+
+    # ★ 동적 중복 검출: 1계층(auto_injected) 파라미터 기준
+    _layer1_ids = set()
+    for p in math_model.get("parameters", []):
+        if p.get("auto_injected") or p.get("layer") == 1:
+            _layer1_ids.add(p.get("id", "").lower())
+    
+    # LLM이 생성한 파라미터 중 1계층과 id가 동일한 것 검출
+    _duplicate_found = []
+    for p in math_model.get("parameters", []):
+        if p.get("auto_injected") or p.get("layer") == 1:
+            continue
+        pid = (p.get("id") or "").lower()
+        if pid and pid in _layer1_ids:
+            _duplicate_found.append(p.get("id", ""))
+    
+    if _duplicate_found:
+        errors.append(
+            f"1계층과 id가 중복되는 파라미터 발견 (재생성 필요): {_duplicate_found}. "
+            f"시스템이 자동 주입하는 파라미터와 동일한 id를 사용하지 마세요."
+        )
+        logger.warning(f"Duplicate layer-1 params detected: {_duplicate_found}")
+
+    # ★ 2계층 파라미터 분류
+    _layer2_need_input = []
+    for p in math_model.get("parameters", []):
+        if p.get("auto_injected") or p.get("auto_bound") or p.get("layer") == 1:
+            continue
+        pid = p.get("id", "")
+        sf = p.get("source_file") or ""
+        dv = p.get("default_value", p.get("default"))
+        if (not sf or sf == "None") and dv is None:
+            _layer2_need_input.append(pid)
+            p["user_input_required"] = True
+            p["layer"] = 2
+    
+    if _layer2_need_input:
+        logger.info(f"Layer-2 params needing user input ({len(_layer2_need_input)}): {_layer2_need_input}")
+
+
+    if len(unbound_params) > 3:
+        warnings.append(
+            f"미바인딩 파라미터 {len(unbound_params)}개 (3개 초과): "
+            f"{unbound_params[:5]}... → 솔버 실행 시 모두 0으로 처리되어 INFEASIBLE 가능"
+        )
+    elif unbound_params:
+        warnings.append(
+            f"미바인딩 파라미터 {len(unbound_params)}개: {unbound_params}"
+        )
+    
+    # 검증5: binary 변수와 큰 상수/파라미터를 직접 비교하는 무효 제약 감지
+    # 예: x[j,i] >= 360 (binary는 0 or 1이므로 1보다 큰 값과 비교 불가)
+    var_types = {v.get("id", ""): v.get("type", "binary") for v in math_model.get("variables", [])}
+    
+    for con in math_model.get("constraints", []):
+        cname = con.get("name", "unknown")
+        lhs = con.get("lhs", {})
+        rhs = con.get("rhs", {})
+        op = con.get("operator", "")
+        
+        if not isinstance(lhs, dict) or not isinstance(rhs, dict):
+            continue
+
+        # 한쪽이 단일 binary 변수이고 다른 쪽이 상수/파라미터인지 체크
+        def _is_single_binary_var(node):
+            """노드가 단일 binary 변수 참조인지"""
+            if "var" in node:
+                var_ref = node["var"]
+                if isinstance(var_ref, dict):
+                    vname = var_ref.get("name", "")
+                    return var_types.get(vname, "binary") == "binary"
+                elif isinstance(var_ref, str):
+                    return var_types.get(var_ref, "binary") == "binary"
+            return False
+
+        def _get_scalar_value(node, param_defaults):
+            """노드가 스칼라 상수이면 그 값을, 파라미터이면 default_value를 반환"""
+            if "value" in node:
+                v = node["value"]
+                if isinstance(v, (int, float)):
+                    return v
+            if "param" in node:
+                p = node["param"]
+                pname = p.get("name", "") if isinstance(p, dict) else str(p)
+                return param_defaults.get(pname)
+            return None
+
+        # 파라미터 default 맵
+        param_defaults = {}
+        for p in math_model.get("parameters", []):
+            pid = p.get("id", p.get("name", ""))
+            dv = p.get("default_value", p.get("default"))
+            if dv is not None:
+                try:
+                    param_defaults[pid] = float(dv)
+                except (ValueError, TypeError):
+                    pass
+
+        # Case A: lhs=binary var, rhs=상수/파라미터
+        if _is_single_binary_var(lhs):
+            rhs_val = _get_scalar_value(rhs, param_defaults)
+            if rhs_val is not None and rhs_val > 1:
+                if op in (">=", ">"):
+                    errors.append(
+                        f"Constraint '{cname}': binary 변수(0/1)에 {op} {rhs_val} 비교 — "
+                        f"항상 불만족 (INFEASIBLE 원인). "
+                        f"시간/값 제약은 sum 또는 별도 연속변수로 표현 필요"
+                    )
+                elif op in ("<=", "<"):
+                    warnings.append(
+                        f"Constraint '{cname}': binary 변수(0/1)에 {op} {rhs_val} 비교 — "
+                        f"항상 만족하여 무의미한 제약"
+                    )
+            elif rhs_val is None and "param" in rhs:
+                # default가 없어도 binary var와 param 직접 비교는 거의 항상 오류
+                rhs_param = rhs["param"]
+                rhs_pname = rhs_param.get("name", "") if isinstance(rhs_param, dict) else str(rhs_param)
+                # sum이 아닌 단일 var와 param 비교이면 오류
+                if "sum" not in lhs:
+                    errors.append(
+                        f"Constraint '{cname}': binary 변수(0/1)를 파라미터 '{rhs_pname}'와 직접 비교 — "
+                        f"binary 변수는 0 또는 1만 가능. "
+                        f"시간/값 제약은 sum(coeff*var) 또는 별도 연속변수(integer/continuous)로 표현 필요"
+                    )
+
+        # Case B: rhs=binary var, lhs=상수/파라미터
+        if _is_single_binary_var(rhs):
+            lhs_val = _get_scalar_value(lhs, param_defaults)
+            if lhs_val is not None and lhs_val > 1:
+                if op in ("<=", "<"):
+                    errors.append(
+                        f"Constraint '{cname}': {lhs_val} {op} binary 변수(0/1) — "
+                        f"항상 불만족 (INFEASIBLE 원인)"
+                    )
+                elif op in (">=", ">"):
+                    warnings.append(
+                        f"Constraint '{cname}': {lhs_val} {op} binary 변수(0/1) — "
+                        f"항상 만족하여 무의미한 제약"
+                    )
+            elif lhs_val is None and "param" in lhs:
+                lhs_param = lhs["param"]
+                lhs_pname = lhs_param.get("name", "") if isinstance(lhs_param, dict) else str(lhs_param)
+                if "sum" not in rhs:
+                    errors.append(
+                        f"Constraint '{cname}': 파라미터 '{lhs_pname}'를 binary 변수(0/1)와 직접 비교 — "
+                        f"binary 변수는 0 또는 1만 가능. "
+                        f"시간/값 제약은 sum(coeff*var) 또는 별도 연속변수(integer/continuous)로 표현 필요"
+                    )
+
+    # 검증6: 양쪽 모두 변수가 없는 제약 (param vs param, value vs value)
+    for con in math_model.get("constraints", []):
+        cname = con.get("name", "unknown")
+        lhs = con.get("lhs", {})
+        rhs = con.get("rhs", {})
+        
+        if not isinstance(lhs, dict) or not isinstance(rhs, dict):
+            continue
+
+        def _has_var(node):
+            """노드 트리에 변수 참조가 있는지"""
+            if not isinstance(node, dict):
+                return False
+            if "var" in node:
+                return True
+            if "sum" in node:
+                s = node["sum"]
+                if isinstance(s, dict) and "var" in s:
+                    return True
+            if "multiply" in node:
+                return any(_has_var(n) for n in node["multiply"] if isinstance(n, dict))
+            if "add" in node:
+                return any(_has_var(n) for n in node["add"] if isinstance(n, dict))
+            if "subtract" in node:
+                return any(_has_var(n) for n in node["subtract"] if isinstance(n, dict))
+            return False
+
+        if not _has_var(lhs) and not _has_var(rhs):
+            warnings.append(
+                f"Constraint '{cname}': 양쪽에 의사결정 변수가 없음 — "
+                f"데이터 검증일 뿐 최적화에 영향 없음 (제거 권장)"
+            )
+
+
+    # 검증4: Set이 Unnamed 컬럼을 source로 사용하는 경우
+    for s in sets:
+        sid = s.get("id", s.get("name", ""))
+        src_col = s.get("source_column") or ""
+        if src_col.startswith("Unnamed"):
+            errors.append(
+                f"Set '{sid}': 비정형 컬럼 '{src_col}'에서 값을 가져옴 → "
+                f"블록 파서 결과(__summary)를 사용해야 함"
+            )
+
+
     is_valid = len(errors) == 0
 
     result = {
@@ -317,6 +986,10 @@ def to_text_summary(result: Dict) -> str:
     if result["corrections"]:
         lines.append(f"\n🔧 자동 교정 ({len(result['corrections'])}개):")
         for key, val in result["corrections"].items():
+            if key == "auto_bind" and isinstance(val, list):
+                for ab in val:
+                    lines.append(f"  - [자동바인딩] {ab}")
+                continue
             lines.append(f"  - {key}: {val['old']} → {val['new']} ({val['reason']})")
 
     return "\n".join(lines)

@@ -27,11 +27,26 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SessionState:
     """프로젝트별 워크플로 상태"""
+    project_id: Optional[str] = None
     file_uploaded: bool = False
     analysis_completed: bool = False
     pre_decision_done: bool = False
     solver_selected: Optional[str] = None
     optimization_done: bool = False
+
+    # ── Problem Definition Phase ──
+    problem_definition_proposed: bool = False
+    problem_definition: Optional[Dict] = None
+    problem_defined: bool = False
+    confirmed_problem: Optional[Dict] = None
+
+    # ── Data Normalization Phase ──
+    normalization_mapping: Optional[Dict] = None
+    normalization_confirmed: bool = False
+    data_normalized: bool = False
+    normalized_data_summary: Optional[Dict] = None
+
+
 
     # Version pointers
     current_dataset_version_id: Optional[int] = None
@@ -50,13 +65,16 @@ class SessionState:
     csv_summary: Optional[str] = None
     math_model: Optional[Dict] = None
     math_model_confirmed: bool = False
+    pending_param_inputs: Optional[List[str]] = None
     last_report: Optional[str] = None
     data_facts: Optional[Dict] = None  # ★ 추가: 코드로 계산된 정확한 팩트 데이터 
+    data_profile: Optional[Dict] = None  # Gate1 column profile
 
     def reset_from_math_model(self):
         """수학 모델 재생성 시 후속 단계 모두 초기화"""
         self.math_model = None
         self.math_model_confirmed = False
+        self.pending_param_inputs = None
         self.pre_decision_done = False
         self.last_pre_decision_result = None
         self.solver_selected = None
@@ -70,6 +88,14 @@ class SessionState:
         self.csv_summary = None
         self.data_facts = None
         self.reset_from_math_model()
+        self.problem_definition_proposed = False
+        self.problem_definition = None
+        self.problem_defined = False
+        self.confirmed_problem = None
+        self.normalization_mapping = None
+        self.normalization_confirmed = False
+        self.data_normalized = False
+        self.normalized_data_summary = None
 
     def context_string(self) -> str:
         parts = []
@@ -193,10 +219,20 @@ def save_session_state(project_id: str, state: SessionState):
         row.csv_summary = state.csv_summary
         row.last_analysis_report = state.last_analysis_report
         row.math_model = json.dumps(state.math_model, ensure_ascii=False) if state.math_model else None
+        row.pending_param_inputs = json.dumps(state.pending_param_inputs, ensure_ascii=False) if state.pending_param_inputs else None
         row.last_pre_decision_result = json.dumps(state.last_pre_decision_result, ensure_ascii=False) if state.last_pre_decision_result else None
         row.last_optimization_result = json.dumps(state.last_optimization_result, ensure_ascii=False) if state.last_optimization_result else None
 
-         # 팩트 데이터
+        # 팩트 데이터
+        # Problem Definition
+        row.problem_defined = getattr(state, 'problem_defined', False)
+        row.problem_definition = json.dumps(state.problem_definition, ensure_ascii=False) if state.problem_definition else None
+        row.confirmed_problem = json.dumps(state.confirmed_problem, ensure_ascii=False) if state.confirmed_problem else None
+        # Data Normalization
+        row.data_normalized = getattr(state, 'data_normalized', False)
+        row.normalization_mapping = json.dumps(state.normalization_mapping, ensure_ascii=False) if state.normalization_mapping else None
+        row.normalized_data_summary = json.dumps(state.normalized_data_summary, ensure_ascii=False) if state.normalized_data_summary else None
+
         row.data_facts = json.dumps(state.data_facts, ensure_ascii=False) if state.data_facts else None
 
         # Version pointers
@@ -226,6 +262,7 @@ def load_session_state(project_id: str) -> Optional[SessionState]:
             return None
 
         state = SessionState()
+        state.project_id = str(project_id)
         state.file_uploaded = row.file_uploaded or False
         state.analysis_completed = row.analysis_completed or False
         state.math_model_confirmed = row.math_model_confirmed or False
@@ -240,7 +277,20 @@ def load_session_state(project_id: str) -> Optional[SessionState]:
         state.last_optimization_result = json.loads(row.last_optimization_result) if row.last_optimization_result else None
 
         # 팩트 데이터
+        # 팩트 데이터
         state.data_facts = json.loads(row.data_facts) if row.data_facts else None
+
+        # Problem Definition
+        state.problem_defined = getattr(row, 'problem_defined', False) or False
+        state.problem_definition_proposed = state.problem_defined  # DB에서 복원 시
+        state.problem_definition = json.loads(row.problem_definition) if getattr(row, 'problem_definition', None) else None
+        state.confirmed_problem = json.loads(row.confirmed_problem) if getattr(row, 'confirmed_problem', None) else None
+        # Data Normalization
+        state.data_normalized = getattr(row, 'data_normalized', False) or False
+        state.normalization_confirmed = state.data_normalized
+        state.normalization_mapping = json.loads(row.normalization_mapping) if getattr(row, 'normalization_mapping', None) else None
+        state.normalized_data_summary = json.loads(row.normalized_data_summary) if getattr(row, 'normalized_data_summary', None) else None
+
 
         # Version pointers
         state.current_dataset_version_id = getattr(row, 'current_dataset_version_id', None)

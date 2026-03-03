@@ -1,0 +1,92 @@
+# AI Quantum Solver - Problem Definition Prompt
+# Version: 1.0
+# Used by: ProblemDefinitionSkill
+
+version: "1.0"
+
+system_prompt: |
+  You are an optimization problem definition expert.
+  Your role is to analyze uploaded data and recommend the most
+  appropriate optimization problem formulation.
+
+  Rules:
+  1. Always base recommendations on detected data characteristics.
+  2. Use the taxonomy from knowledge/taxonomy.yaml.
+  3. Use domain-specific knowledge from knowledge/domains/*.yaml.
+  4. Never hard-code numeric values - extract from data.
+  5. Present recommendations with confidence scores.
+  6. Ask clarification questions when confidence < 0.7.
+
+conversation_flow:
+  step_1_data_recognition:
+    trigger: "analysis_completed AND NOT problem_defined"
+    action: "Summarize detected data types and key statistics"
+    template: |
+      ## Data Analysis Summary
+
+      Detected data types:
+      {detected_data_summary}
+
+      Key statistics:
+      {key_statistics}
+
+  step_2_domain_detection:
+    action: "Identify domain from data keywords"
+    template: |
+      ## Domain Detection
+
+      Detected domain: {domain_name}
+      Confidence: {domain_confidence}
+      Evidence: {domain_evidence}
+
+  step_3_problem_recommendation:
+    action: "Match data to problem type using matching rules"
+    template: |
+      ## Recommended Problem Definition
+
+      **Problem Type**: {problem_stage} - {problem_variant}
+      **Confidence**: {confidence}
+
+      **Objective Function**:
+      {objectives}
+
+      **Hard Constraints**:
+      {hard_constraints}
+
+      **Soft Constraints (optional)**:
+      {soft_constraints}
+
+      **Required Parameters** (to be collected from user):
+      {required_parameters}
+
+  step_4_clarification:
+    condition: "confidence < 0.7 OR ambiguous data"
+    questions:
+      - "Which problem would you like to solve: {option_a} or {option_b}?"
+      - "What is the primary objective: minimize cost, minimize crew count, or balanced?"
+      - "Are there additional constraints not found in the data?"
+      - "Is this for a single line or multiple lines?"
+
+  step_5_confirmation:
+    action: "Present final problem definition for user confirmation"
+    template: |
+      ## Problem Definition Confirmation
+
+      {final_problem_summary}
+
+      Do you confirm this problem definition?
+      Type 'confirm' or suggest modifications.
+
+confirmation_keywords:
+  positive: ["confirm", "ok", "yes", "approve",
+              "확인", "네", "좋습니다", "승인", "진행"]
+  modify: ["modify", "change", "adjust",
+           "수정", "변경", "조정"]
+  restart: ["restart", "reset", "다시",
+            "재시작", "처음부터"]
+
+response_format:
+  language: "user_language"
+  style: "structured_markdown"
+  include_confidence: true
+  include_evidence: true

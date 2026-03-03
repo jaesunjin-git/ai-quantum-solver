@@ -108,6 +108,16 @@ class SessionStateDB(Base):
     last_optimization_result = Column(Text, nullable=True)  # JSON string
     data_facts = Column(Text, nullable=True)                # ★ 추가: JSON string
 
+    # Problem Definition
+    problem_defined = Column(Boolean, default=False)
+    problem_definition = Column(Text, nullable=True)
+    confirmed_problem = Column(Text, nullable=True)
+
+    # Data Normalization
+    data_normalized = Column(Boolean, default=False)
+    normalization_mapping = Column(Text, nullable=True)
+    normalized_data_summary = Column(Text, nullable=True)
+
     # 도메인 정보
     detected_domain = Column(String, nullable=True)
     domain_confidence = Column(String, nullable=True)

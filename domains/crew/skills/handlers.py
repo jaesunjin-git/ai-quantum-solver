@@ -37,6 +37,11 @@ async def handle_file_upload(session: CrewSession, project_id: str, event_data: 
         state.uploaded_files = [f.get("filename", "unknown") for f in files]
 
     state.file_uploaded = True
+    # ★ Phase1: 파일 추가 시 분석/모델 상태 리셋
+    state.analysis_completed = False
+    state.math_model = None
+    state.math_model_confirmed = False
+    state.pending_param_inputs = None
     state.last_executed_skill = "FileReceivedSkill"
 
     # Save dataset version

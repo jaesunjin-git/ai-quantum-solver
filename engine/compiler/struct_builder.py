@@ -32,6 +32,17 @@ class BuildContext:
             return None
         if val is None:
             return None
+        # 리스트/배열이면 스칼라가 아님 → None 반환 (indexed로 처리해야 함)
+        if isinstance(val, (list, tuple)):
+            logger.warning(f"Parameter '{name}' is array (len={len(val)}), not scalar")
+            return None
+        try:
+            import numpy as np
+            if isinstance(val, np.ndarray):
+                logger.warning(f"Parameter '{name}' is ndarray (shape={val.shape}), not scalar")
+                return None
+        except ImportError:
+            pass
         if isinstance(val, str):
             try:
                 return int(val)
@@ -62,6 +73,42 @@ class BuildContext:
                         return result
             return result
         if val is not None:
+            # list/tuple인 경우: key를 set에서 찾아 인덱스로 변환
+            if isinstance(val, (list, tuple)):
+                # 1) key가 정수 인덱스이고 범위 내이면 직접 사용
+                if isinstance(key, int) and 0 <= key < len(val):
+                    result = val[key]
+                    if isinstance(result, (int, float)):
+                        return int(result) if isinstance(result, float) and result == int(result) else result
+                    return result
+                # 2) set_map에서 key의 위치(순서) 찾기
+                for set_id, set_vals in self.set_map.items():
+                    if isinstance(set_vals, (list, tuple)):
+                        try:
+                            idx = list(set_vals).index(key)
+                            if idx < len(val):
+                                result = val[idx]
+                                if isinstance(result, (int, float)):
+                                    return int(result) if isinstance(result, float) and result == int(result) else result
+                                return result
+                        except (ValueError, IndexError):
+                            continue
+                # 3) key를 int로 변환 시도
+                try:
+                    int_key = int(key)
+                    if 0 <= int_key < len(val):
+                        result = val[int_key]
+                        if isinstance(result, (int, float)):
+                            return int(result) if isinstance(result, float) and result == int(result) else result
+                        return result
+                except (ValueError, TypeError):
+                    pass
+                # 4) 매핑 실패 — 배열 길이와 set 크기가 다른 경우 0 반환
+                logger.warning(
+                    f"Parameter '{name}': array len={len(val)}, "
+                    f"key={key} not mappable to index"
+                )
+                return 0
             if isinstance(val, str):
                 try:
                     return int(val)
@@ -188,6 +235,12 @@ def eval_node(node: Any, binding: Dict[str, Any], ctx: BuildContext) -> Any:
         if not index_str:
             val = ctx.get_param_scalar(name)
             if val is None:
+                # scalar 실패 → binding에서 인덱스 추출하여 indexed 시도
+                if binding:
+                    for idx_key in binding.values():
+                        indexed_val = ctx.get_param_indexed(name, idx_key)
+                        if indexed_val != 0 or ctx.param_map.get(name) is not None:
+                            return indexed_val
                 logger.warning(f"Parameter '{name}' not found in param_map, using 0")
                 return 0
             return val

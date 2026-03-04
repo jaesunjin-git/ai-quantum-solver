@@ -19,6 +19,15 @@ data_types:
       - direction_count
       - time_range
       - line_count
+    standard_columns:
+      trip_id: "운행 고유 ID"
+      direction: "운행 방향 (forward/reverse)"
+      dep_station: "출발역"
+      arr_station: "도착역"
+      trip_dep_time: "출발 시각 (분)"
+      trip_arr_time: "도착 시각 (분)"
+      trip_duration: "운행 소요시간 (분)"
+      station_count: "경유 역 수"
 
   work_regulations:
     name_ko: "근무 규정 / 협약"

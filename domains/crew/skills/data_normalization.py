@@ -838,7 +838,11 @@ Each mapping must have: target_table, source_file, source_sheet, transform_type,
 
         logger.info(f"ID columns: fwd={id_col}, rev={id_col_rev}")
 
-        # --- Step 5: Extract trips ---
+        # --- Step 5: Extract trips (standard_columns 참조) ---
+        _std = self.data_detection.get("data_types", {}).get("timetable", {}).get("standard_columns", {})
+        _col_dep = next((k for k, v in _std.items() if "출발" in str(v) and "시각" in str(v)), "trip_dep_time")
+        _col_arr = next((k for k, v in _std.items() if "도착" in str(v) and "시각" in str(v)), "trip_arr_time")
+        _col_dur = next((k for k, v in _std.items() if "소요" in str(v)), "trip_duration")
         trips = []
 
         for idx, row in df.iterrows():
@@ -859,9 +863,9 @@ Each mapping must have: target_table, source_file, source_sheet, transform_type,
                             "direction": "forward",
                             "dep_station": times[0][0],
                             "arr_station": times[-1][0],
-                            "dep_time_min": times[0][1],
-                            "arr_time_min": times[-1][1],
-                            "travel_time_min": times[-1][1] - times[0][1],
+                            _col_dep: times[0][1],
+                            _col_arr: times[-1][1],
+                            _col_dur: times[-1][1] - times[0][1],
                             "station_count": len(times),
                         })
 
@@ -884,9 +888,9 @@ Each mapping must have: target_table, source_file, source_sheet, transform_type,
                             "direction": "reverse",
                             "dep_station": times[0][0],
                             "arr_station": times[-1][0],
-                            "dep_time_min": times[0][1],
-                            "arr_time_min": times[-1][1],
-                            "travel_time_min": times[-1][1] - times[0][1],
+                            _col_dep: times[0][1],
+                            _col_arr: times[-1][1],
+                            _col_dur: times[-1][1] - times[0][1],
                             "station_count": len(times),
                         })
 
@@ -895,7 +899,7 @@ Each mapping must have: target_table, source_file, source_sheet, transform_type,
             return None
 
         result = pd.DataFrame(trips)
-        result = result.sort_values("dep_time_min").reset_index(drop=True)
+        result = result.sort_values(_col_dep).reset_index(drop=True)
         fwd_c = len(result[result.direction == "forward"])
         rev_c = len(result[result.direction == "reverse"])
         logger.info(f"Extracted {len(result)} trips (forward={fwd_c}, reverse={rev_c})")

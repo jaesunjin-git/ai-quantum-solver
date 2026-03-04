@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 import asyncio
 from typing import List,  Dict, Any, Optional
@@ -39,6 +40,28 @@ except Exception as e:
 # JSON 스키마 정의 (LLM에게 보여줄 빈 양식)
 # ============================================================
 # 수학 모델 JSON 스키마 - prompts/schemas/constraint_schema.yaml에서 제약 스키마 로드
+
+# ── 도메인 YAML 로더 ──
+def _load_domain_yaml(domain: str) -> dict:
+    """knowledge/domains/{domain}.yaml 로드"""
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    domain_dir = os.path.join(base, "knowledge", "domains")
+    if not os.path.isdir(domain_dir):
+        return {}
+    for fname in os.listdir(domain_dir):
+        if fname.endswith(".yaml"):
+            fpath = os.path.join(domain_dir, fname)
+            try:
+                import yaml as _yaml
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = _yaml.safe_load(f) or {}
+                if data.get("domain") == domain:
+                    logger.info(f"Domain YAML loaded: {fpath}")
+                    return data
+            except Exception:
+                pass
+    return {}
+
 def _get_model_schema() -> str:
     config = load_yaml_prompt("crew", "math_model")
     if not config:
@@ -237,6 +260,13 @@ def _build_data_guide(dataframes: dict) -> str:
     guide_lines.append("  - for_each와 sum.over에 동일 set을 사용하면 안 됩니다")
     guide_lines.append("    (예: for_each='j in J'이면 sum.over='i in I'로 다른 set 사용)")
     guide_lines.append("  - source_file/source_column이 없는 파라미터는 반드시 default_value를 설정하세요")
+    guide_lines.append("")
+    guide_lines.append("★ 데이터 컬럼 vs 파라미터 구분 (중요):")
+    guide_lines.append("  - trips.csv의 컬럼(trip_dep_time, trip_arr_time, trip_duration 등)은 파라미터가 아닙니다")
+    guide_lines.append("  - 이 값들은 sum의 coeff에서 source_column으로 참조하세요:")
+    guide_lines.append("    예: \"coeff\": {\"param\": {\"name\": \"trip_duration\", \"source_column\": \"trip_duration\", \"source_file\": \"normalized/trips.csv\"}}")
+    guide_lines.append("  - deadhead_time은 두 운행 사이 시간 차이로 계산되므로 별도 파라미터로 정의하지 마세요")
+    guide_lines.append("  - parameters 배열에는 상수/규정값(max_work_minutes 등)만 넣으세요")
     
     return "\n".join(guide_lines)
 
@@ -281,7 +311,8 @@ def _build_modeling_prompt(
     confirmed_section = ""
     if confirmed_problem:
         import json as _json
-        # 1계층 파라미터 목록 동적 생성
+
+        # 1계층 파라미터 목록
         _cp_params = confirmed_problem.get("parameters", {})
         _param_lines = []
         for _pid, _pval in _cp_params.items():
@@ -292,46 +323,90 @@ def _build_modeling_prompt(
             _param_lines.append(f"  - {_pid} (value: {_v})")
         _param_list_text = "\n".join(_param_lines) if _param_lines else "  (none)"
         _param_ids = ", ".join(_cp_params.keys())
-        
-        # 제약조건 formulation 조립 (confirmed_problem에서 동적 추출)
-        _constraint_lines = []
-        for _ctype in ["hard_constraints", "soft_constraints"]:
-            for _cid, _cdata in confirmed_problem.get(_ctype, {}).items():
-                if not isinstance(_cdata, dict):
-                    continue
-                _name_ko = _cdata.get("name_ko", _cid)
-                _formulation = _cdata.get("formulation", "")
-                _desc = _cdata.get("description", "")
-                _param = _cdata.get("parameter", "")
-                _params = _cdata.get("parameters", {})
-                _priority = "hard" if _ctype == "hard_constraints" else "soft"
-                _line = f"  - {_cid} ({_priority}): {_name_ko}"
-                if _desc:
-                    _line += f" — {_desc}"
-                if _formulation:
-                    _line += f"\n    formulation: {_formulation}"
-                if _param:
-                    _line += f"\n    parameter: {_param}"
-                if _params and isinstance(_params, dict):
-                    _line += f"\n    parameters: {list(_params.keys())}"
-                _constraint_lines.append(_line)
-        _constraints_text = "\n".join(_constraint_lines) if _constraint_lines else "  (없음)"
 
-        # 목적함수 조립 (confirmed_problem에서 동적 추출)
-        _obj_info = confirmed_problem.get("objective", {})
-        _obj_lines = []
-        if isinstance(_obj_info, dict):
-            _obj_type = _obj_info.get("type", "minimize")
-            _obj_target = _obj_info.get("target", "")
-            _obj_desc = _obj_info.get("description", "")
-            _obj_lines.append(f"  방향: {_obj_type}")
-            _obj_lines.append(f"  대상: {_obj_desc or _obj_target}")
-            _alts = _obj_info.get("alternatives", [])
+        # ★ 도메인 YAML에서 constraint_templates 로드
+        _domain_yaml = _load_domain_yaml(domain)
+        _ct = _domain_yaml.get("constraint_templates", {})
+
+        _template_json_lines = []
+        _required_vars = []
+        _obj_template = None
+
+        for _tid, _tdata in _ct.items():
+            if _tid == "_note":
+                continue
+            if not isinstance(_tdata, dict):
+                continue
+            # 목적함수 템플릿 분리
+            if _tdata.get("_type") == "objective_template":
+                _obj_template = _tdata
+                continue
+            # 제약 템플릿 -> JSON 텍스트
+            _clean = {k: v for k, v in _tdata.items()
+                      if k not in ("_note", "requires_variables")}
+            _template_json_lines.append(
+                f"  // {_tdata.get('description', _tid)}\n"
+                f"  {_json.dumps(_clean, ensure_ascii=False)}"
+            )
+            # 필요 변수 수집
+            for _rv in _tdata.get("requires_variables", []):
+                if _rv not in _required_vars:
+                    _required_vars.append(_rv)
+
+        if _template_json_lines:
+            _templates_text = (
+                "아래 JSON 제약 구조를 constraints 배열에 **그대로** 넣으세요.\n"
+                "이름, 변수명, 파라미터명을 임의로 바꾸지 마세요.\n"
+                "필요시 추가 제약은 같은 JSON 구조로 작성할 수 있습니다.\n\n"
+                + "\n\n".join(_template_json_lines)
+            )
+        else:
+            _templates_text = ""
+
+        # 필요 변수 지시
+        _req_vars_text = ""
+        if _required_vars:
+            _req_vars_text = (
+                "\n\n[필수 추가 변수]\n"
+                "아래 변수를 variables 배열에 반드시 포함하세요:\n"
+                + "\n".join(f"  - {rv}" for rv in _required_vars)
+            )
+
+        # 목적함수 지시
+        _obj_text = "  (추론 필요)"
+        if _obj_template:
+            _obj_text = (
+                f"  방향: {_obj_template.get('type', 'minimize')}\n"
+                f"  대상: {_obj_template.get('description', '')}\n"
+                f"  expression: {_json.dumps(_obj_template.get('expression', {}), ensure_ascii=False)}"
+            )
+            _alts = _obj_template.get("alternatives", [])
             if _alts:
-                _alt_texts = [a.get("description", a.get("target", "")) for a in _alts if isinstance(a, dict)]
+                _alt_texts = [a.get("description", "") for a in _alts if isinstance(a, dict)]
                 if _alt_texts:
-                    _obj_lines.append(f"  대안: {', '.join(_alt_texts)}")
-        _obj_text = "\n".join(_obj_lines) if _obj_lines else "  (추론 필요)"
+                    _obj_text += f"\n  대안: {', '.join(_alt_texts)}"
+        elif confirmed_problem.get("objective"):
+            _obj_info = confirmed_problem["objective"]
+            _obj_text = f"  방향: {_obj_info.get('type', 'minimize')}\n  대상: {_obj_info.get('description', _obj_info.get('target', ''))}"
+
+        # 데이터 컬럼 참조 지시
+        _data_cols = _domain_yaml.get("data_columns", {})
+        _data_col_text = ""
+        if _data_cols:
+            _dc_lines = ["아래는 파라미터가 아닌 데이터 컬럼입니다. parameters 배열에 넣지 마세요.",
+                         "sum의 coeff.param에서 source_column/source_file로 참조하세요."]
+            for _src_key, _src_info in _data_cols.items():
+                if not isinstance(_src_info, dict):
+                    continue
+                _sf = _src_info.get("source_file", "")
+                _cols = _src_info.get("columns", {})
+                if _cols:
+                    for _cn, _cd in _cols.items():
+                        _dc_lines.append(f"  - {_cn}: {_cd} (source_file: {_sf})")
+                _note = _src_info.get("note", _src_info.get("description", ""))
+                if _note:
+                    _dc_lines.append(f"  참고: {str(_note).strip()}")
+            _data_col_text = "\n[데이터 컬럼 (파라미터 아님)]\n" + "\n".join(_dc_lines)
 
         confirmed_section = (
             f"\n[확정된 문제 정의]\n"
@@ -339,14 +414,16 @@ def _build_modeling_prompt(
             f"세부 유형: {confirmed_problem.get('variant', '')}\n"
             f"\n[확정된 목적함수]\n"
             + _obj_text
-            + f"\n\n[확정된 제약조건 목록과 수식]\n"
-            f"아래 제약조건의 formulation을 반드시 따르세요. 새로운 제약을 임의로 만들지 마세요.\n"
-            + _constraints_text
-            + f"\n\n[사용 가능한 파라미터 목록 - 1계층 (시스템 자동 주입)]\n"
+            + f"\n\n[제약조건 JSON 템플릿 — 반드시 이 구조를 사용]\n"
+            + (_templates_text if _templates_text else "  (없음)")
+            + _req_vars_text
+            + _data_col_text
+            + f"\n\n[1계층 파라미터 (시스템 자동 주입)]\n"
             + f"아래 {len(_cp_params)}개 파라미터는 시스템이 자동 주입합니다:\n"
             + _param_list_text
             + f"\n(id 목록: {_param_ids})\n\n"
         )
+
     prompt = f"""{system}
 
 중요 규칙:

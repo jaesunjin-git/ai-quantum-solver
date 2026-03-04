@@ -144,11 +144,43 @@ constraints:
         cleanup_time_minutes:
           typical_range: [20, 60]
 
+    big_m_constant:
+      name_ko: "Big-M 상수"
+      description: "선형화에 사용하는 충분히 큰 수 (1일=1440분)"
+      parameter: M
+      unit: minutes
+      typical_range: [1440, 2880]
+      formulation: "linearization constant for min/max time constraints"
+
     qualification:
       name_ko: "자격 요건"
       description: "승무원 자격이 해당 노선/열차 요건과 일치"
       parameter: null
       formulation: "assign only if crew qualifies for the line/train type"
+
+    max_total_stay_time:
+      name_ko: "최대 체류시간"
+      description: "회사 내 총 체류시간(출근~퇴근) 상한"
+      parameter: max_total_stay_time
+      unit: minutes
+      typical_range: [600, 720]
+      formulation: "w[d] - z[d] <= max_total_stay_time for all d"
+
+    max_wait_time:
+      name_ko: "최대 대기시간"
+      description: "듀티 내 1회 인정대기시간 상한"
+      parameter: max_wait_time_in_duty
+      unit: minutes
+      typical_range: [120, 180]
+      formulation: "wait_time_segment <= max_wait_time_in_duty"
+
+    min_wait_time:
+      name_ko: "최소 대기시간"
+      description: "듀티 내 평균 대기시간 하한(실대기 기준)"
+      parameter: min_wait_time_in_duty
+      unit: minutes
+      typical_range: [0, 180]
+      formulation: "avg_wait_time[d] >= min_wait_time_in_duty (soft guide)"
 
   soft:
     workload_balance:
@@ -185,6 +217,10 @@ reference_values:
     min_break_minutes: 40
     night_rest_minutes: 360
     typical_duty_count_range: [30, 80]
+    max_total_stay_time: 720
+    M: 1440
+    max_wait_time_in_duty: 180
+    min_wait_time_in_duty: 180
   korean_conventional_rail:
     max_driving_minutes: 420
     max_work_minutes: 720
@@ -192,3 +228,221 @@ reference_values:
     cleanup_time_minutes: 60
     min_break_minutes: 45
     night_rest_minutes: 480
+    max_total_stay_time: 720
+    M: 1440
+    max_wait_time_in_duty: 180
+    min_wait_time_in_duty: 180
+
+# 데이터 컬럼 매핑 (파라미터가 아닌 데이터 소스 컬럼)
+data_columns:
+  trips_csv:
+    source_file: "normalized/trips.csv"
+    columns:
+      trip_id: "운행 고유 ID"
+      trip_dep_time: "출발 시각(분)"
+      trip_arr_time: "도착 시각(분)"
+      trip_duration: "운행 소요시간(분) = arr_time - dep_time"
+      direction: "운행 방향(상행/하행)"
+      start_station: "출발역"
+      end_station: "도착역"
+    note: >
+      이 컬럼들은 sum의 coeff에서 source_column으로 참조해야 하며,
+      parameters 배열에 별도 항목으로 정의하면 안 됩니다.
+  deadhead:
+    description: >
+      공차회송 시간(deadhead_time)은 두 운행 사이의 이동시간으로,
+      trips.csv의 시각 데이터에서 계산해야 합니다.
+      별도 파라미터로 정의하지 마세요.
+
+constraint_templates:
+  _note: LLM은 이 JSON 구조를 그대로 constraints 배열에 넣어야 합니다. 변수/파라미터 이름을 임의로 바꾸지 마세요.
+  trip_coverage:
+    name: trip_coverage
+    description: 모든 운행은 정확히 하나의 듀티에 배정
+    for_each: i in I
+    lhs:
+      sum:
+        var: y
+        index: '[i,d]'
+        over: d in D
+        coeff: null
+    operator: ==
+    rhs:
+      value: 1
+    category: hard
+    expression: sum(y[i,d] for d in D) == 1
+  duty_assignment_limit:
+    name: duty_assignment_limit
+    description: 각 듀티는 최대 1명의 승무원에게 배정
+    for_each: d in D
+    lhs:
+      sum:
+        var: x
+        index: '[j,d]'
+        over: j in J
+        coeff: null
+    operator: <=
+    rhs:
+      value: 1
+    category: hard
+    expression: sum(x[j,d] for j in J) <= 1
+  max_driving_time:
+    name: max_driving_time
+    description: 듀티 내 총 승무(운전)시간이 상한 이하
+    for_each: d in D
+    lhs:
+      sum:
+        var: y
+        index: '[i,d]'
+        over: i in I
+        coeff:
+          param:
+            name: trip_duration
+            index: '[i]'
+            source_column: trip_duration
+            source_file: normalized/trips.csv
+    operator: <=
+    rhs:
+      param:
+        name: max_driving_minutes
+        index: null
+    category: hard
+    expression: sum(trip_duration[i] * y[i,d] for i in I) <= max_driving_minutes
+  max_work_time:
+    name: max_work_time
+    description: 준비+승무+정리 포함 총 근무시간 상한
+    for_each: d in D
+    lhs:
+      add:
+      - sum:
+          var: y
+          index: '[i,d]'
+          over: i in I
+          coeff:
+            param:
+              name: trip_duration
+              index: '[i]'
+              source_column: trip_duration
+              source_file: normalized/trips.csv
+      - param:
+          name: prep_time_minutes
+          index: null
+      - param:
+          name: cleanup_time_minutes
+          index: null
+    operator: <=
+    rhs:
+      param:
+        name: max_work_minutes
+        index: null
+    category: hard
+    expression: sum(trip_duration[i]*y[i,d] for i in I) + prep_time_minutes + cleanup_time_minutes
+      <= max_work_minutes
+  max_total_stay_time:
+    name: max_total_stay_time
+    description: 듀티의 총 체류시간(최초출발~최종도착+정리) 상한
+    for_each: d in D
+    lhs:
+      subtract:
+      - var:
+          name: w
+          index: '[d]'
+      - var:
+          name: z
+          index: '[d]'
+    operator: <=
+    rhs:
+      param:
+        name: max_total_stay_time
+        index: null
+    category: hard
+    expression: w[d] - z[d] <= max_total_stay_time
+    requires_variables:
+    - z (integer, indices=[D], 듀티 시작시각 분)
+    - w (integer, indices=[D], 듀티 종료시각 분)
+  duty_start_time:
+    name: duty_start_time
+    description: 듀티 시작시각 = 배정된 운행 중 최소 출발시각 - 준비시간
+    for_each: d in D
+    _note: Big-M 또는 min 선형화 필요. z[d] <= trip_dep_time[i] - prep_time + M*(1-y[i,d])
+    lhs:
+      var:
+        name: z
+        index: '[d]'
+    operator: <=
+    rhs:
+      add:
+      - param:
+          name: trip_dep_time
+          index: '[i]'
+          source_column: trip_dep_time
+          source_file: normalized/trips.csv
+      - multiply:
+        - value: -1
+        - param:
+            name: prep_time_minutes
+            index: null
+      - multiply:
+        - param:
+            name: M
+            index: null
+        - subtract:
+          - value: 1
+          - var:
+              name: y
+              index: '[i,d]'
+    category: hard
+    expression: z[d] <= trip_dep_time[i] - prep_time_minutes + M*(1-y[i,d]) for all
+      i
+    requires_variables:
+    - z (integer, indices=[D])
+  duty_end_time:
+    name: duty_end_time
+    description: 듀티 종료시각 = 배정된 운행 중 최대 도착시각 + 정리시간
+    for_each: d in D
+    _note: Big-M 선형화. w[d] >= trip_arr_time[i] + cleanup_time - M*(1-y[i,d])
+    lhs:
+      var:
+        name: w
+        index: '[d]'
+    operator: '>='
+    rhs:
+      subtract:
+      - add:
+        - param:
+            name: trip_arr_time
+            index: '[i]'
+            source_column: trip_arr_time
+            source_file: normalized/trips.csv
+        - param:
+            name: cleanup_time_minutes
+            index: null
+      - multiply:
+        - param:
+            name: M
+            index: null
+        - subtract:
+          - value: 1
+          - var:
+              name: y
+              index: '[i,d]'
+    category: hard
+    expression: w[d] >= trip_arr_time[i] + cleanup_time_minutes - M*(1-y[i,d]) for
+      all i
+    requires_variables:
+    - w (integer, indices=[D])
+  minimize_duties_objective:
+    _type: objective_template
+    type: minimize
+    description: 사용되는 듀티 수 최소화
+    expression:
+      sum:
+        var: x
+        index: '[j,d]'
+        over: j in J, d in D
+        coeff: null
+    alternatives:
+    - type: minimize
+      description: 총 근무시간 최소화
+    - type: minimize
+      description: 공차회송 최소화

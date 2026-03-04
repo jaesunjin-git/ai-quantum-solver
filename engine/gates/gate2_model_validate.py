@@ -326,6 +326,13 @@ def run(math_model: Dict,
     corrections: Dict[str, Any] = {}
     set_sizes: Dict[str, int] = {}
 
+    # ★ 데이터 컬럼 이름 수집 (param 미정의 경고 제외용)
+    data_column_names = set()
+    if dataframes:
+        for _dk, _df in dataframes.items():
+            for _col in _df.columns:
+                data_column_names.add(str(_col).strip())
+
     sets = math_model.get("sets", [])
     variables = math_model.get("variables", [])
     constraints = math_model.get("constraints", [])
@@ -445,7 +452,7 @@ def run(math_model: Dict,
         lhs = c.get("lhs", {})
         rhs = c.get("rhs", {})
         for side_name, side in [("lhs", lhs), ("rhs", rhs)]:
-            _check_node_refs(side, cname, side_name, var_ids, param_names, warnings)
+            _check_node_refs(side, cname, side_name, var_ids, param_names, warnings, data_column_names)
 
         # for_each에서 참조하는 set 검증
         for_each = c.get("for_each", "")
@@ -851,6 +858,14 @@ def run(math_model: Dict,
 
     is_valid = len(errors) == 0
 
+    # -- 상세 로그 출력 --
+    if errors:
+        for i, e in enumerate(errors):
+            logger.error(f"Gate2 error  [{i+1}/{len(errors)}]: {e}")
+    if warnings:
+        for i, w in enumerate(warnings):
+            logger.warning(f"Gate2 warn   [{i+1}/{len(warnings)}]: {w}")
+
     result = {
         "valid": is_valid,
         "errors": errors,
@@ -915,10 +930,13 @@ def _validate_set(set_def: Dict,
 
 def _check_node_refs(node: Any, cname: str, side: str,
                      var_ids: set, param_names: set,
-                     warnings: List[str]):
+                     warnings: List[str],
+                     data_col_names: set = None):
     """노드에서 참조하는 변수/파라미터가 정의되어 있는지 재귀 검사"""
     if not isinstance(node, dict):
         return
+    if data_col_names is None:
+        data_col_names = set()
 
     # var 참조
     if "var" in node:
@@ -930,8 +948,16 @@ def _check_node_refs(node: Any, cname: str, side: str,
 
     # param 참조
     if "param" in node:
-        param_ref = node["param"] if isinstance(node["param"], str) else node["param"].get("name", "")
-        if param_ref and param_ref not in param_names:
+        param_node = node["param"]
+        if isinstance(param_node, str):
+            param_ref = param_node
+            has_source = False
+        else:
+            param_ref = param_node.get("name", "")
+            has_source = bool(param_node.get("source_column") or param_node.get("source_file"))
+        # 데이터 컬럼명과 일치하면 데이터 참조이므로 경고 불필요
+        is_data_col = param_ref in data_col_names
+        if param_ref and param_ref not in param_names and not has_source and not is_data_col:
             warnings.append(
                 f"Constraint '{cname}' {side}: parameter '{param_ref}' 미정의"
             )
@@ -941,7 +967,7 @@ def _check_node_refs(node: Any, cname: str, side: str,
         sum_node = node["sum"]
         if isinstance(sum_node, dict):
             if "coeff" in sum_node and sum_node["coeff"]:
-                _check_node_refs(sum_node["coeff"], cname, side, var_ids, param_names, warnings)
+                _check_node_refs(sum_node["coeff"], cname, side, var_ids, param_names, warnings, data_col_names)
 
     # subtract, add, multiply 노드
     for op_key in ["subtract", "add", "multiply"]:
@@ -949,9 +975,9 @@ def _check_node_refs(node: Any, cname: str, side: str,
             sub = node[op_key]
             if isinstance(sub, list):
                 for item in sub:
-                    _check_node_refs(item, cname, side, var_ids, param_names, warnings)
+                    _check_node_refs(item, cname, side, var_ids, param_names, warnings, data_col_names)
             elif isinstance(sub, dict):
-                _check_node_refs(sub, cname, side, var_ids, param_names, warnings)
+                _check_node_refs(sub, cname, side, var_ids, param_names, warnings, data_col_names)
 
 
 def _fuzzy_match_column(target: str, available: set) -> Optional[str]:

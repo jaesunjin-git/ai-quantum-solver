@@ -293,9 +293,55 @@ def _build_modeling_prompt(
         _param_list_text = "\n".join(_param_lines) if _param_lines else "  (none)"
         _param_ids = ", ".join(_cp_params.keys())
         
+        # 제약조건 formulation 조립 (confirmed_problem에서 동적 추출)
+        _constraint_lines = []
+        for _ctype in ["hard_constraints", "soft_constraints"]:
+            for _cid, _cdata in confirmed_problem.get(_ctype, {}).items():
+                if not isinstance(_cdata, dict):
+                    continue
+                _name_ko = _cdata.get("name_ko", _cid)
+                _formulation = _cdata.get("formulation", "")
+                _desc = _cdata.get("description", "")
+                _param = _cdata.get("parameter", "")
+                _params = _cdata.get("parameters", {})
+                _priority = "hard" if _ctype == "hard_constraints" else "soft"
+                _line = f"  - {_cid} ({_priority}): {_name_ko}"
+                if _desc:
+                    _line += f" — {_desc}"
+                if _formulation:
+                    _line += f"\n    formulation: {_formulation}"
+                if _param:
+                    _line += f"\n    parameter: {_param}"
+                if _params and isinstance(_params, dict):
+                    _line += f"\n    parameters: {list(_params.keys())}"
+                _constraint_lines.append(_line)
+        _constraints_text = "\n".join(_constraint_lines) if _constraint_lines else "  (없음)"
+
+        # 목적함수 조립 (confirmed_problem에서 동적 추출)
+        _obj_info = confirmed_problem.get("objective", {})
+        _obj_lines = []
+        if isinstance(_obj_info, dict):
+            _obj_type = _obj_info.get("type", "minimize")
+            _obj_target = _obj_info.get("target", "")
+            _obj_desc = _obj_info.get("description", "")
+            _obj_lines.append(f"  방향: {_obj_type}")
+            _obj_lines.append(f"  대상: {_obj_desc or _obj_target}")
+            _alts = _obj_info.get("alternatives", [])
+            if _alts:
+                _alt_texts = [a.get("description", a.get("target", "")) for a in _alts if isinstance(a, dict)]
+                if _alt_texts:
+                    _obj_lines.append(f"  대안: {', '.join(_alt_texts)}")
+        _obj_text = "\n".join(_obj_lines) if _obj_lines else "  (추론 필요)"
+
         confirmed_section = (
             f"\n[확정된 문제 정의]\n"
-            + _json.dumps(confirmed_problem, ensure_ascii=False, indent=2)
+            f"문제 단계: {confirmed_problem.get('stage', '')}\n"
+            f"세부 유형: {confirmed_problem.get('variant', '')}\n"
+            f"\n[확정된 목적함수]\n"
+            + _obj_text
+            + f"\n\n[확정된 제약조건 목록과 수식]\n"
+            f"아래 제약조건의 formulation을 반드시 따르세요. 새로운 제약을 임의로 만들지 마세요.\n"
+            + _constraints_text
             + f"\n\n[사용 가능한 파라미터 목록 - 1계층 (시스템 자동 주입)]\n"
             + f"아래 {len(_cp_params)}개 파라미터는 시스템이 자동 주입합니다:\n"
             + _param_list_text

@@ -1,107 +1,103 @@
-# AI Quantum Solver - Problem Stage Taxonomy
-# Version: 1.0
-# Updated: 2026-03-03
-
-version: "1.0"
-
+version: '1.0'
 stages:
   task_generation:
-    name_ko: "업무(듀티) 생성"
-    name_en: "Task / Duty Generation"
-    description: >
-      주어진 시간표(운행 계획)에서 법적·운영 제약을 만족하는
-      최소 비용의 듀티(근무 단위)를 생성한다.
-    formulations:
-      - set_covering
-      - set_partitioning
-      - column_generation
-    typical_objectives:
-      - min_duties
-      - min_total_cost
-      - min_deadhead
-    required_data:
-      - timetable
-      - work_regulations
-    optional_data:
-      - crew_info
-      - existing_duty
+    name_ko: 업무(듀티) 생성
+    name_en: Task / Duty Generation
+    description: '주어진 시간표(운행 계획)에서 법적·운영 제약을 만족하는 최소 비용의 듀티(근무 단위)를 생성한다.
 
+      '
+    formulations:
+    - set_covering
+    - set_partitioning
+    - column_generation
+    typical_objectives:
+    - min_duties
+    - min_total_cost
+    - min_deadhead
+    required_data:
+    - timetable
+    - work_regulations
+    optional_data:
+    - crew_info
+    - existing_duty
+    variant_group: duty_generation
   shift_scheduling:
-    name_ko: "교번(시프트) 편성"
-    name_en: "Shift Scheduling"
-    description: >
-      생성된 듀티를 교번표(시프트 패턴)로 묶어
-      근무-휴무 균형과 공정성을 확보한다.
-    formulations:
-      - integer_programming
-      - set_covering
-    typical_objectives:
-      - min_shifts
-      - balance_workload
-      - min_overtime
-    required_data:
-      - duty_set
-      - work_regulations
-    optional_data:
-      - crew_info
-      - demand_profile
+    name_ko: 교번(시프트) 편성
+    name_en: Shift Scheduling
+    description: '생성된 듀티를 교번표(시프트 패턴)로 묶어 근무-휴무 균형과 공정성을 확보한다.
 
+      '
+    formulations:
+    - integer_programming
+    - set_covering
+    typical_objectives:
+    - min_shifts
+    - balance_workload
+    - min_overtime
+    required_data:
+    - duty_set
+    - work_regulations
+    optional_data:
+    - crew_info
+    - demand_profile
+    variant_group: shift_scheduling
   roster_assignment:
-    name_ko: "로스터(배치) 할당"
-    name_en: "Roster Assignment"
-    description: >
-      교번 또는 듀티를 개별 승무원에게 배정하여
-      자격, 선호도, 공정성을 만족시킨다.
-    formulations:
-      - assignment_problem
-      - constraint_satisfaction
-      - multi_objective_optimization
-    typical_objectives:
-      - min_cost
-      - max_fairness
-      - max_preference_satisfaction
-    required_data:
-      - duty_set_or_shift_set
-      - crew_info
-      - work_regulations
-    optional_data:
-      - preference_data
+    name_ko: 로스터(배치) 할당
+    name_en: Roster Assignment
+    description: '교번 또는 듀티를 개별 승무원에게 배정하여 자격, 선호도, 공정성을 만족시킨다.
 
+      '
+    formulations:
+    - assignment_problem
+    - constraint_satisfaction
+    - multi_objective_optimization
+    typical_objectives:
+    - min_cost
+    - max_fairness
+    - max_preference_satisfaction
+    required_data:
+    - duty_set_or_shift_set
+    - crew_info
+    - work_regulations
+    optional_data:
+    - preference_data
+    variant_group: roster_assignment
   realtime_rescheduling:
-    name_ko: "실시간 재스케줄링"
-    name_en: "Real-time Rescheduling"
-    description: >
-      운행 중 지연, 결근 등 돌발 상황에서
-      기존 스케줄을 최소 변경으로 수정한다.
-    formulations:
-      - re_optimization
-      - constraint_propagation
-    typical_objectives:
-      - min_deviation_from_original
-      - min_uncovered_trips
-      - min_delay_propagation
-    required_data:
-      - current_schedule
-      - disruption_info
-    optional_data:
-      - crew_availability
+    name_ko: 실시간 재스케줄링
+    name_en: Real-time Rescheduling
+    description: '운행 중 지연, 결근 등 돌발 상황에서 기존 스케줄을 최소 변경으로 수정한다.
 
-  integrated:
-    name_ko: "통합 스케줄링"
-    name_en: "Integrated Scheduling"
-    description: >
-      듀티 생성 + 로스터 배정 등 복수 단계를
-      동시에 최적화한다.
+      '
     formulations:
-      - decomposition
-      - bi_level_optimization
+    - re_optimization
+    - constraint_propagation
     typical_objectives:
-      - min_total_system_cost
-      - min_crew_count
+    - min_deviation_from_original
+    - min_uncovered_trips
+    - min_delay_propagation
     required_data:
-      - timetable
-      - work_regulations
-      - crew_info
+    - current_schedule
+    - disruption_info
     optional_data:
-      - demand_profile
-      - preference_data
+    - crew_availability
+    variant_group: realtime_rescheduling
+  integrated:
+    name_ko: 통합 스케줄링
+    name_en: Integrated Scheduling
+    description: '듀티 생성 + 로스터 배정 등 복수 단계를 동시에 최적화한다.
+
+      '
+    formulations:
+    - decomposition
+    - bi_level_optimization
+    typical_objectives:
+    - min_total_system_cost
+    - min_crew_count
+    required_data:
+    - timetable
+    - work_regulations
+    - crew_info
+    optional_data:
+    - demand_profile
+    - preference_data
+    variant_group: integrated

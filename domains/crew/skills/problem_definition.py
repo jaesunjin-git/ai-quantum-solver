@@ -5,8 +5,13 @@ domains/crew/skills/problem_definition.py
 Problem Definition Skill.
 
 기존 분석 결과(csv_summary, data_facts, data_profile, analysis_report)를 읽고,
-도메인 지식(knowledge/domains/railway.yaml)을 참조하여
+도메인 지식(knowledge/domains/*.yaml)을 참조하여
 문제 유형, 목적함수, 제약조건, 파라미터를 확정한다.
+
+데이터 유형 감지: knowledge/data_detection.yaml
+문제 매칭 규칙: knowledge/matching_rules.yaml
+문제 단계 분류: knowledge/taxonomy.yaml
+도메인 지식:     knowledge/domains/{domain}.yaml
 
 입력: session.state의 기존 분석 결과
 출력: session.state.confirmed_problem
@@ -15,7 +20,7 @@ Problem Definition Skill.
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -39,8 +44,39 @@ class ProblemDefinitionSkill:
 
     def __init__(self):
         self.taxonomy = _load_yaml("knowledge/taxonomy.yaml")
+        self.data_detection = _load_yaml("knowledge/data_detection.yaml")
+        self.matching_rules = _load_yaml("knowledge/matching_rules.yaml")
         self.prompt_config = _load_yaml("prompts/problem_definition.yaml")
         self._domain_cache: Dict[str, dict] = {}
+
+        # data_detection.yaml에서 데이터 유형별 키워드 맵 구축
+        self._detection_keywords: Dict[str, List[List[str]]] = {}
+        self._extraction_keys: Dict[str, List[str]] = {}
+        for dtype, dinfo in self.data_detection.get("data_types", {}).items():
+            self._detection_keywords[dtype] = dinfo.get("column_keywords", [])
+            self._extraction_keys[dtype] = dinfo.get("extraction_keys", [])
+
+        # matching_rules.yaml에서 규칙 맵 구축
+        self._matching_rules: Dict[str, dict] = self.matching_rules.get("rules", {})
+
+        # taxonomy.yaml에서 stage→variant_group 매핑 동적 구축
+        self._stage_variant_group: Dict[str, str] = {}
+        for stage_key, stage_info in self.taxonomy.get("stages", {}).items():
+            vg = stage_info.get("variant_group", stage_key)
+            self._stage_variant_group[stage_key] = vg
+
+        # taxonomy.yaml에서 목적함수 설명 맵 동적 구축
+        self._obj_descriptions: Dict[str, str] = {}
+        for stage_key, stage_info in self.taxonomy.get("stages", {}).items():
+            for obj in stage_info.get("typical_objectives", []):
+                self._obj_descriptions[obj] = obj.replace("_", " ")
+
+        logger.info(
+            f"ProblemDefinitionSkill init: "
+            f"detection_types={list(self._detection_keywords.keys())}, "
+            f"matching_rules={list(self._matching_rules.keys())}, "
+            f"taxonomy_stages={list(self.taxonomy.get('stages', {}).keys())}"
+        )
 
     # ──────────────────────────────────────
     # public entry point
@@ -57,7 +93,8 @@ class ProblemDefinitionSkill:
 
         # 첫 진입: 분석 결과 기반 제안 생성
         domain_yaml = self._load_domain_yaml(state)
-        problem_type = self._determine_problem_type(state, domain_yaml)
+        detected_data_types = self._detect_data_types(state)
+        problem_type = self._determine_problem_type(state, domain_yaml, detected_data_types)
         objective = self._determine_objective(problem_type, domain_yaml)
         constraints = self._determine_constraints(problem_type, domain_yaml)
         parameters = self._collect_parameters(state, domain_yaml)
@@ -65,6 +102,7 @@ class ProblemDefinitionSkill:
         proposal = {
             "stage": problem_type.get("stage", "task_generation"),
             "variant": problem_type.get("variant"),
+            "detected_data_types": list(detected_data_types),
             "objective": objective,
             "hard_constraints": constraints.get("hard", {}),
             "soft_constraints": constraints.get("soft", {}),
@@ -93,22 +131,72 @@ class ProblemDefinitionSkill:
         }
 
     # ──────────────────────────────────────
+    # 0. 데이터 유형 감지 (data_detection.yaml 기반)
+    # ──────────────────────────────────────
+    def _detect_data_types(self, state) -> Set[str]:
+        """data_detection.yaml의 column_keywords를 사용하여 데이터 유형 감지"""
+        detected = set()
+        facts = state.data_facts or {}
+        all_columns = facts.get("all_columns", {})
+
+        # 전체 컬럼 텍스트를 시트별로 수집
+        for sheet_key, columns in all_columns.items():
+            col_text = " ".join(str(c).lower() for c in columns)
+
+            for dtype, keyword_groups in self._detection_keywords.items():
+                if dtype in detected:
+                    continue
+                # keyword_groups: [["departure","arrival","출발","도착"], ["station","역"]]
+                # 각 그룹에서 하나라도 매치되면 해당 데이터 유형으로 감지
+                for group in keyword_groups:
+                    if any(kw.lower() in col_text for kw in group):
+                        detected.add(dtype)
+                        break
+
+        # data_profile에서 구조 기반 추가 감지
+        if state.data_profile and isinstance(state.data_profile, dict):
+            for sheet_key, info in state.data_profile.get("files", {}).items():
+                if info.get("structure") == "non_tabular_block":
+                    detected.add("existing_duty")
+
+        logger.info(f"Detected data types: {detected}")
+        return detected
+
+    # ──────────────────────────────────────
     # 1. 도메인 YAML 로드
     # ──────────────────────────────────────
     def _load_domain_yaml(self, state) -> dict:
         domain = state.detected_domain or "generic"
-        domain_map = {"crew": "railway", "railway": "railway"}
-        domain_key = domain_map.get(domain, domain)
 
-        path = _BASE / "knowledge" / "domains" / f"{domain_key}.yaml"
-        if not path.exists():
-            # fallback: domains 폴더에서 첫 번째 yaml
-            domains_dir = _BASE / "knowledge" / "domains"
-            if domains_dir.exists():
-                for f in domains_dir.glob("*.yaml"):
-                    path = f
-                    break
-        return self._get_cached_yaml(str(path))
+        # knowledge/domains/ 폴더에서 동적으로 매칭
+        domains_dir = _BASE / "knowledge" / "domains"
+        if domains_dir.exists():
+            # 정확 매칭 시도
+            exact_path = domains_dir / f"{domain}.yaml"
+            if exact_path.exists():
+                return self._get_cached_yaml(str(exact_path))
+
+            # crew -> railway 등 도메인 프로파일에서 매핑 조회
+            # domain_profiles.yaml의 키 목록으로 유사 매칭
+            for yaml_file in domains_dir.glob("*.yaml"):
+                domain_key = yaml_file.stem  # railway, aviation 등
+                cached = self._get_cached_yaml(str(yaml_file))
+                # 도메인 YAML의 detection_keywords에서 현재 domain과 매칭
+                det_kws = cached.get("detection_keywords", [])
+                flat_kws = []
+                for item in det_kws:
+                    if isinstance(item, list):
+                        flat_kws.extend(item)
+                    else:
+                        flat_kws.append(str(item))
+                if domain.lower() in [k.lower() for k in flat_kws]:
+                    return cached
+
+            # fallback: 첫 번째 yaml
+            for yaml_file in domains_dir.glob("*.yaml"):
+                return self._get_cached_yaml(str(yaml_file))
+
+        return {}
 
     def _get_cached_yaml(self, path: str) -> dict:
         if path not in self._domain_cache:
@@ -121,64 +209,122 @@ class ProblemDefinitionSkill:
         return self._domain_cache[path]
 
     # ──────────────────────────────────────
-    # 2. 문제 유형 결정
+    # 2. 문제 유형 결정 (matching_rules.yaml 기반)
     # ──────────────────────────────────────
-    def _determine_problem_type(self, state, domain_yaml: dict) -> dict:
-        result = {"stage": "task_generation", "variant": None, "confidence": 0.5}
+    def _determine_problem_type(
+        self, state, domain_yaml: dict, detected_data_types: Set[str]
+    ) -> dict:
+        best = {"stage": "task_generation", "variant": None, "confidence": 0.0}
 
-        # data_facts에서 단서 추출
-        facts = state.data_facts or {}
-        sheet_info = facts.get("sheet_info", {})
-        all_columns = facts.get("all_columns", {})
+        # matching_rules.yaml의 각 규칙을 평가
+        for rule_name, rule in self._matching_rules.items():
+            required = set(rule.get("required_data", []))
+            optional = set(rule.get("optional_data", []))
+            base_conf = rule.get("base_confidence", 0.5)
+            stage = rule.get("recommended_stage", "task_generation")
 
-        # 힌트 수집
-        has_timetable = False
-        has_existing_duty = False
-        has_crew_info = False
-        station_count = 0
+            # 필수 데이터가 모두 감지되었는지 확인
+            if not required.issubset(detected_data_types):
+                continue
 
-        for sheet_key, columns in all_columns.items():
-            col_text = " ".join(str(c).lower() for c in columns)
+            confidence = base_conf
 
-            if any(kw in col_text for kw in ["열번", "배차", "departure", "arrival", "출발", "도착"]):
-                has_timetable = True
-            if any(kw in col_text for kw in ["dia", "듀티", "duty", "교번"]):
-                has_existing_duty = True
-            if any(kw in col_text for kw in ["승무원", "기관사", "인원", "crew", "driver"]):
-                has_crew_info = True
+            # boost 조건 평가
+            for boost in rule.get("boost_conditions", []):
+                condition = boost.get("condition", "")
+                boost_val = boost.get("boost", 0)
 
-        # data_profile에서 구조 단서
-        if state.data_profile and isinstance(state.data_profile, dict):
-            for sheet_key, info in state.data_profile.get("files", {}).items():
-                if info.get("structure") == "non_tabular_block":
-                    has_existing_duty = True
+                # 조건 해석 (간단한 패턴 매칭)
+                if "detected" in condition:
+                    # "existing_duty detected" → existing_duty가 감지되었으면 boost
+                    for dtype in detected_data_types:
+                        if dtype in condition:
+                            confidence += boost_val
+                            break
+                elif "trip_count" in condition or "crew_count" in condition:
+                    # 데이터 팩트에서 수치 확인
+                    facts = state.data_facts or {}
+                    unique = facts.get("unique_counts", {})
+                    for key, count in unique.items():
+                        if "trip" in key.lower() and "trip_count" in condition:
+                            try:
+                                threshold = int(re.search(r"\d+", condition).group())
+                                if count >= threshold:
+                                    confidence += boost_val
+                            except (AttributeError, ValueError):
+                                pass
+                        if "crew" in key.lower() and "crew_count" in condition:
+                            try:
+                                threshold = int(re.search(r"\d+", condition).group())
+                                if count >= threshold:
+                                    confidence += boost_val
+                            except (AttributeError, ValueError):
+                                pass
+                elif "all five data types" in condition:
+                    if len(detected_data_types) >= 5:
+                        confidence += boost_val
 
-        # 문제 유형 결정
-        if has_timetable:
-            result["stage"] = "task_generation"
-            result["confidence"] = 0.8
-            if has_existing_duty:
-                result["confidence"] = 0.9
+            confidence = min(confidence, 1.0)
 
-        # variant 결정 (도메인 YAML 참조)
-        variants = domain_yaml.get("problem_variants", {}).get("duty_generation", {})
-        # 기본: single_line_bidirectional
-        result["variant"] = "single_line_bidirectional"
+            if confidence > best["confidence"]:
+                best = {
+                    "stage": stage,
+                    "variant": None,
+                    "confidence": confidence,
+                    "matched_rule": rule_name,
+                }
 
-        # station 수로 보정
-        for sheet_key, columns in all_columns.items():
-            station_cols = [c for c in columns if not any(
-                kw in str(c).lower() for kw in
-                ["열번", "배차", "반복", "회차", "영업", "편도", "unnamed"]
-            )]
-            if len(station_cols) > station_count:
-                station_count = len(station_cols)
+        # variant 결정 (도메인 YAML의 problem_variants에서)
+        variants = domain_yaml.get("problem_variants", {})
+        # stage에 해당하는 variant 그룹 찾기
+        stage = best.get("stage", "task_generation")
+        variant_group_key = self._stage_variant_group.get(stage, stage)
 
-        if station_count >= 6:
-            # 많은 역이 컬럼으로 있으면 단일노선 양방향 가능성 높음
-            result["variant"] = "single_line_bidirectional"
+        if variant_group_key and variant_group_key in variants:
+            variant_group = variants[variant_group_key]
+            best_variant = None
+            best_variant_score = 0
 
-        return result
+            facts = state.data_facts or {}
+            all_columns = facts.get("all_columns", {})
+
+            for vkey, vinfo in variant_group.items():
+                hints = vinfo.get("detection_hints", [])
+                score = 0
+                for hint in hints:
+                    hint_lower = hint.lower()
+                    # 힌트를 데이터 특성과 매칭
+                    if "2 termini" in hint_lower or "bidirectional" in hint_lower:
+                        # direction 컬럼 존재 여부
+                        for cols in all_columns.values():
+                            col_text = " ".join(str(c).lower() for c in cols)
+                            if "direction" in col_text or "방향" in col_text or "상행" in col_text:
+                                score += 1
+                                break
+                    if "single line" in hint_lower:
+                        score += 0.5  # 기본 가정
+                    if "one direction" in hint_lower:
+                        pass  # 단방향 감지 로직
+                    if "multiple line" in hint_lower or "3+ termini" in hint_lower:
+                        pass  # 다중 노선 감지 로직
+
+                if score > best_variant_score:
+                    best_variant_score = score
+                    best_variant = vkey
+
+            if best_variant:
+                best["variant"] = best_variant
+            else:
+                # 첫 번째 variant를 기본값으로
+                first_variant = next(iter(variant_group.keys()), None)
+                best["variant"] = first_variant
+
+        logger.info(
+            f"Problem type determined: stage={best.get('stage')}, "
+            f"variant={best.get('variant')}, confidence={best.get('confidence')}, "
+            f"rule={best.get('matched_rule')}"
+        )
+        return best
 
     # ──────────────────────────────────────
     # 3. 목적함수 결정
@@ -188,12 +334,13 @@ class ProblemDefinitionSkill:
         variant = problem_type.get("variant")
 
         # 도메인 YAML에서 variant별 목적함수 후보 가져오기
+        variant_group_key = self._stage_variant_group.get(stage, stage)
         variant_info = (
             domain_yaml
             .get("problem_variants", {})
-            .get("duty_generation", {})
+            .get(variant_group_key, {})
             .get(variant, {})
-        )
+        ) if variant else {}
         example_objectives = variant_info.get("example_objectives", [])
 
         # taxonomy에서 stage별 기본 목적함수
@@ -201,27 +348,33 @@ class ProblemDefinitionSkill:
         typical_objectives = stage_info.get("typical_objectives", [])
 
         # 기본 목적함수 선택
-        primary = "min_duties"
+        primary = None
         if example_objectives:
             primary = example_objectives[0]
         elif typical_objectives:
             primary = typical_objectives[0]
+        else:
+            # taxonomy 전체에서 첫 번째 objective를 fallback으로 사용
+            all_stage_objs = []
+            for _si in self.taxonomy.get("stages", {}).values():
+                all_stage_objs.extend(_si.get("typical_objectives", []))
+            primary = all_stage_objs[0] if all_stage_objs else "minimize"
 
-        # 목적함수명 → 설명 매핑
-        obj_descriptions = {
-            "min_duties": "듀티 수 최소화",
-            "minimize total number of duties": "듀티 수 최소화",
-            "minimize total deadhead time": "공차회송 시간 최소화",
-            "minimize total work time": "총 근무시간 최소화",
-            "min_total_cost": "총 비용 최소화",
-            "min_deadhead": "공차회송 최소화",
-            "min_cost": "비용 최소화",
-        }
+        # 도메인 YAML의 constraints에서 목적함수 설명 보강
+        domain_objectives = domain_yaml.get("constraints", {}).get("soft", {})
+        # taxonomy의 typical_objectives에서 설명 동적 구축
+        all_obj_descriptions = dict(self._obj_descriptions)
+        # 도메인 YAML의 typical_objectives (있으면)
+        for obj_text in domain_yaml.get("problem_variants", {}).get(
+            variant_group_key, {}
+        ).get(variant, {}).get("example_objectives", []):
+            all_obj_descriptions[obj_text.lower().strip()] = obj_text
 
         primary_clean = primary.lower().strip()
-        description = obj_descriptions.get(primary_clean, primary)
-        for key, desc in obj_descriptions.items():
-            if key in primary_clean:
+        description = all_obj_descriptions.get(primary_clean, primary)
+        # 부분 매칭
+        for key, desc in all_obj_descriptions.items():
+            if key in primary_clean or primary_clean in key:
                 description = desc
                 break
 
@@ -229,9 +382,9 @@ class ProblemDefinitionSkill:
         all_objs = example_objectives or typical_objectives
         for obj in all_objs[1:3]:
             obj_clean = obj.lower().strip()
-            alt_desc = obj_descriptions.get(obj_clean, obj)
-            for key, desc in obj_descriptions.items():
-                if key in obj_clean:
+            alt_desc = all_obj_descriptions.get(obj_clean, obj)
+            for key, desc in all_obj_descriptions.items():
+                if key in obj_clean or obj_clean in key:
                     alt_desc = desc
                     break
             alternatives.append({"target": obj, "description": alt_desc})
@@ -295,7 +448,7 @@ class ProblemDefinitionSkill:
                 for pname in cdata.get("parameters", {}).keys():
                     required_params.add(pname)
 
-        # 데이터에서 추출 시도
+        # 데이터에서 추출 시도 (data_detection.yaml 기반)
         extracted = self._try_extract_from_data(state, required_params)
 
         # 각 파라미터에 대해 값 결정
@@ -341,31 +494,51 @@ class ProblemDefinitionSkill:
         return next(iter(ref_values.values()), {})
 
     def _try_extract_from_data(self, state, required_params: set) -> dict:
+        """data_detection.yaml의 work_regulations.column_keywords를 사용하여 파라미터 추출"""
         extracted = {}
         if not state.data_facts:
             return extracted
 
         all_columns = state.data_facts.get("all_columns", {})
 
-        param_keywords = {
-            "max_work_minutes": ["최대근무", "max_work", "총근무시간", "근로시간"],
-            "max_driving_minutes": ["최대승무", "max_driv", "승무시간"],
-            "min_break_minutes": ["휴식", "break", "식사"],
-            "prep_time_minutes": ["준비", "prep", "출근", "인수"],
-            "cleanup_time_minutes": ["정리", "cleanup", "퇴근", "인계"],
-            "night_rest_minutes": ["야간", "night", "숙박", "주박"],
-        }
+        # data_detection.yaml에서 work_regulations의 extraction_keys와
+        # column_keywords를 사용하여 파라미터-키워드 매핑 구축
+        work_reg = self.data_detection.get("data_types", {}).get("work_regulations", {})
+        work_keywords = work_reg.get("column_keywords", [])
+        extraction_keys = work_reg.get("extraction_keys", [])
+
+        # extraction_keys에서 required_params와 매칭되는 것 찾기
+        # 키워드 그룹을 평탄화하여 사용
+        flat_keywords = []
+        for group in work_keywords:
+            if isinstance(group, list):
+                flat_keywords.extend(group)
+            else:
+                flat_keywords.append(str(group))
 
         for sheet_key, columns in all_columns.items():
             for param_name in required_params:
                 if param_name in extracted:
                     continue
-                keywords = param_keywords.get(param_name, [])
-                if not keywords:
+
+                # param_name이 extraction_keys에 있는지 확인
+                if param_name not in extraction_keys:
                     continue
+
+                # param_name에서 키워드 추출 (snake_case 분리)
+                param_words = set(param_name.lower().replace("_", " ").split())
+                # "minutes", "min", "time" 등 단위어 제거
+                stop_words = {"minutes", "min", "time", "per", "param"}
+                param_core = param_words - stop_words
+
                 for col in columns:
                     col_l = str(col).lower()
-                    if any(kw.lower() in col_l for kw in keywords):
+                    # 1차: flat_keywords 중 하나라도 컬럼명에 포함
+                    kw_match = any(kw.lower() in col_l for kw in flat_keywords)
+                    # 2차: param 핵심 단어가 컬럼명에 포함
+                    core_match = any(w in col_l for w in param_core) if param_core else False
+
+                    if kw_match and core_match:
                         # data_profile에서 샘플값 추출
                         if state.data_profile:
                             col_info = (
@@ -379,8 +552,10 @@ class ProblemDefinitionSkill:
                             if samples:
                                 try:
                                     extracted[param_name] = float(samples[0])
+                                    break
                                 except (ValueError, IndexError):
                                     pass
+
         return extracted
 
     # ──────────────────────────────────────
@@ -396,17 +571,20 @@ class ProblemDefinitionSkill:
         stage_info = self.taxonomy.get("stages", {}).get(stage, {})
         stage_ko = stage_info.get("name_ko", stage)
 
+        # variant 한국어 이름을 도메인 YAML에서 동적 조회
+        variant_group_key = self._stage_variant_group.get(stage, stage)
         variant_info = (
             domain_yaml
             .get("problem_variants", {})
-            .get("duty_generation", {})
+            .get(variant_group_key, {})
             .get(variant, {})
-        )
-        variant_ko = variant_info.get("name_ko", variant)
+        ) if variant else {}
+        variant_ko = variant_info.get("name_ko", variant or "")
 
         lines.append("### 1. 문제 유형")
         lines.append(f"- **단계**: {stage_ko}")
-        lines.append(f"- **세부 유형**: {variant_ko}")
+        if variant_ko:
+            lines.append(f"- **세부 유형**: {variant_ko}")
         lines.append("")
 
         # 2. 목적함수
@@ -516,9 +694,9 @@ class ProblemDefinitionSkill:
                 "type": "problem_definition",
                 "text": (
                     "수정할 항목을 알려주세요. 예시:\n\n"
-                    "- 목적함수를 총 근무시간 최소화로 변경\n"
-                    "- max_work_minutes = 600\n"
-                    "- 공차회송 최소화 제약 제거\n"
+                    "- 목적함수를 [목적함수명]으로 변경\n"
+                    "- [파라미터명] = [값]\n"
+                    "- [제약조건명] 제거\n"
                 ),
                 "data": {"agent_status": "modification_pending"},
                 "options": [],
@@ -544,7 +722,7 @@ class ProblemDefinitionSkill:
             }
 
         # 파라미터 수정 (key = value 패턴)
-        param_pattern = re.compile(r"(\w+)\s*[=:]\s*(\d+(?:\.\d+)?)")
+        param_pattern = re.compile(r"(\w+)\s*[=:：]\s*(\d+(?:\.\d+)?)")
         matches = param_pattern.findall(message)
         if matches and state.problem_definition:
             params = state.problem_definition.get("parameters", {})
@@ -577,34 +755,31 @@ class ProblemDefinitionSkill:
                     ],
                 }
 
-        # 목적함수 변경 요청 감지
+        # 목적함수 변경 요청 감지 (taxonomy + 도메인 YAML 기반)
         if state.problem_definition:
-            obj_keywords = {
-                "듀티 수 최소화": {"target": "min_duties", "description": "듀티 수 최소화"},
-                "근무시간 최소화": {"target": "min_total_work_time", "description": "총 근무시간 최소화"},
-                "공차회송 최소화": {"target": "min_deadhead", "description": "공차회송 시간 최소화"},
-                "비용 최소화": {"target": "min_cost", "description": "총 비용 최소화"},
-            }
-            for keyword, obj_update in obj_keywords.items():
-                if keyword in message:
-                    state.problem_definition["objective"]["target"] = obj_update["target"]
-                    state.problem_definition["objective"]["description"] = obj_update["description"]
-                    save_session_state(project_id, state)
-                    return {
-                        "type": "problem_definition",
-                        "text": (
-                            f"목적함수를 **{obj_update['description']}**으로 변경했습니다.\n\n"
-                            "**확인**을 입력하면 문제 정의가 확정됩니다."
-                        ),
-                        "data": {
-                            "proposal": state.problem_definition,
-                            "agent_status": "objective_modified",
-                        },
-                        "options": [
-                            {"label": "확인", "action": "send", "message": "확인"},
-                            {"label": "추가 수정", "action": "send", "message": "수정"},
-                        ],
-                    }
+            # taxonomy의 모든 objectives에서 한국어 매핑 동적 구축
+            for stage_key, stage_info in self.taxonomy.get("stages", {}).items():
+                for obj in stage_info.get("typical_objectives", []):
+                    obj_ko = obj.replace("_", " ")
+                    if obj_ko in message or obj in message:
+                        state.problem_definition["objective"]["target"] = obj
+                        state.problem_definition["objective"]["description"] = obj_ko
+                        save_session_state(project_id, state)
+                        return {
+                            "type": "problem_definition",
+                            "text": (
+                                f"목적함수를 **{obj_ko}**으로 변경했습니다.\n\n"
+                                "**확인**을 입력하면 문제 정의가 확정됩니다."
+                            ),
+                            "data": {
+                                "proposal": state.problem_definition,
+                                "agent_status": "objective_modified",
+                            },
+                            "options": [
+                                {"label": "확인", "action": "send", "message": "확인"},
+                                {"label": "추가 수정", "action": "send", "message": "수정"},
+                            ],
+                        }
 
         # 기타
         return {

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 """
 domains/crew/skills/math_model.py
 ─────────────────────────────────
@@ -233,7 +233,7 @@ async def skill_math_model(model, session: CrewSession, project_id: str, message
                 model_str = _json.dumps(model, ensure_ascii=False)
                 applied_count = 0
                 for ckey, cval in gate2_result["corrections"].items():
-                    if cval.get("type") == "column_name_fix":
+                    if isinstance(cval, dict) and cval.get("type") == "column_name_fix":
                         old_name = cval["old"]
                         new_name = cval["new"]
                         # JSON 문자열에서 정확한 값 치환 ("old_name" -> "new_name")
@@ -246,6 +246,15 @@ async def skill_math_model(model, session: CrewSession, project_id: str, message
                 if applied_count > 0:
                     model = _json.loads(model_str)
                     logger.info(f"Gate2 corrections applied: {applied_count} column name fixes")
+
+            # [DEBUG] 모델 JSON 저장 (디버깅용)
+            import os as _os
+            _model_dir = _os.path.join('uploads', str(project_id))
+            _os.makedirs(_model_dir, exist_ok=True)
+            _model_path = _os.path.join(_model_dir, 'model.json')
+            with open(_model_path, 'w', encoding='utf-8') as _mf:
+                _json.dump(model, _mf, ensure_ascii=False, indent=2)
+            logger.info(f'Model JSON saved to {_model_path}')
 
             logger.info(
                 f"Gate2 (attempt {attempt}): valid={gate2_result['valid']}, "
@@ -518,7 +527,8 @@ async def skill_math_model(model, session: CrewSession, project_id: str, message
             if not validation.get("warnings"):
                 validation["warnings"] = []
             for key, val in gate2_result["corrections"].items():
-                validation["warnings"].append(f"자동 교정: {key} {val['old']} → {val['new']}")
+                if isinstance(val, dict) and 'old' in val and 'new' in val:
+                    validation["warnings"].append(f"자동 교정: {key} {val['old']} → {val['new']}")
 
         # Gate 2 경고를 validation에 병합
         if gate2_result.get("warnings"):
@@ -679,3 +689,5 @@ async def handle_math_model_confirm(model, session: CrewSession, project_id: str
 
     # 기타 → 일반 처리
     return await skill_general(model, session, project_id, message, {})
+
+

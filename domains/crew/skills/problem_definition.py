@@ -705,10 +705,11 @@ class ProblemDefinitionSkill:
         is_prep = any(w in param_name.lower() for w in ["prep", "준비"])
         is_cleanup = any(w in param_name.lower() for w in ["cleanup", "정리"])
 
-        # context_must: all_keywords 중 가장 구별력 있는 키워드를 AND 조건으로 사용
-        # 2글자 이상 키워드만 (단독 "최대" 같은 범용어 제외)
-        context_must = [kw for kw in all_keywords if len(kw) >= 2
-                        and kw not in ("최대", "최소", "시간", "제한", "limit")]
+        # context_must: cdata에 명시된 것을 우선 사용, 없으면 keywords에서 자동 생성
+        context_must = cdata.get("context_must", None)
+        if not context_must:
+            context_must = [kw for kw in all_keywords if len(kw) >= 2
+                            and kw not in ("최대", "최소", "시간", "제한", "limit")]
 
         candidates = []
 

@@ -661,6 +661,30 @@ class StructuralNormalizationSkill:
             trips_df.to_csv(str(phase1_dir / "timetable_rows.csv"), index=False, encoding="utf-8")
             report["timetable_trips"] = len(trips_df)
 
+            # ── 시간 겹침 쌍 사전 계산 (time_compatibility용) ──
+            if "trip_dep_time" in trips_df.columns and "trip_arr_time" in trips_df.columns:
+                try:
+                    import json as _json
+                    dep = trips_df["trip_dep_time"].astype(float).values
+                    arr = trips_df["trip_arr_time"].astype(float).values
+                    ids = trips_df["trip_id"].astype(str).values
+                    overlap_pairs = []
+                    n = len(dep)
+                    for i in range(n):
+                        for j in range(i + 1, n):
+                            if dep[i] < arr[j] and dep[j] < arr[i]:
+                                overlap_pairs.append([ids[i], ids[j]])
+                    overlap_path = phase1_dir / "overlap_pairs.json"
+                    with open(str(overlap_path), "w", encoding="utf-8") as _of:
+                        _json.dump(overlap_pairs, _of)
+                    report["overlap_pairs"] = len(overlap_pairs)
+                    logger.info(
+                        f"Overlap pairs: {len(overlap_pairs)} / {n*(n-1)//2} total pairs "
+                        f"({len(overlap_pairs)*100//(n*(n-1)//2) if n > 1 else 0}%)"
+                    )
+                except Exception as e:
+                    logger.warning(f"Overlap pairs calculation failed: {e}")
+
             # 기본 통계
             report["trip_stats"] = {
                 "total": len(trips_df),

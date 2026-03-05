@@ -1370,6 +1370,49 @@ def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str
         fix_param_nodes(con.get("lhs", {}), cname)
         fix_param_nodes(con.get("rhs", {}), cname)
 
+    # ── overlap_pairs 주입: 3중 루프 제약에 사전 필터링 적용 ──
+    try:
+        import json as _json
+        import os as _os
+        for c in constraints:
+            cname = c.get("name", "")
+            fe = c.get("for_each", "")
+            loop_vars = [v.strip().split()[0] for v in fe.split(",") if " in " in v]
+            if len(loop_vars) >= 3 and "i" in loop_vars and "j" in loop_vars:
+                # uploads/ 하위에서 overlap_pairs.json 탐색
+                op_found = False
+                for dirpath, dirs, files in _os.walk("uploads"):
+                    if "overlap_pairs.json" in files:
+                        op_path = _os.path.join(dirpath, "overlap_pairs.json")
+                        with open(op_path, "r", encoding="utf-8") as _f:
+                            pairs = _json.load(_f)
+                        if pairs:
+                            c["_overlap_pairs"] = pairs
+                            # d 루프만 남기므로 예상 제약 수 = pairs * |D|
+                            d_size = 1
+                            for lv_name, lv_set in re.findall(r"(\w+)\s+in\s+(\w+)", fe):
+                                if lv_name not in ("i", "j"):
+                                    d_size *= set_sizes.get(lv_set, 500)
+                            old_count = 1
+                            for lv_name, lv_set in re.findall(r"(\w+)\s+in\s+(\w+)", fe):
+                                old_count *= set_sizes.get(lv_set, 500)
+                            new_count = len(pairs) * d_size
+                            warnings.append(
+                                f"Overlap filter applied to '{cname}': "
+                                f"{len(pairs)} pairs ({old_count:,} -> {new_count:,} constraints)"
+                            )
+                            fix_count += 1
+                            logger.info(
+                                f"Struct fix [{cname}]: injected {len(pairs)} overlap pairs "
+                                f"(reduction: {old_count:,} -> {new_count:,})"
+                            )
+                            op_found = True
+                        break
+                if not op_found:
+                    logger.warning(f"No overlap_pairs.json found for constraint '{cname}'")
+    except Exception as _e:
+        logger.warning(f"Overlap pairs injection failed: {_e}")
+
     if fix_count > 0:
         logger.info(f"Struct validation: {fix_count} structural fixes applied")
     else:

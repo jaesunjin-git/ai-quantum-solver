@@ -538,6 +538,12 @@ Each mapping must have: target_table, source_file, source_sheet, transform_type,
                             out_path = norm_dir / "trips.csv"
                             df.to_csv(str(out_path), index=False, encoding="utf-8")
                             results.append(f"trips.csv: {len(df)} rows (from Phase 1)")
+                            # overlap_pairs.json도 복사
+                            _op_src = upload_dir / "phase1" / "overlap_pairs.json"
+                            if _op_src.exists():
+                                import shutil
+                                shutil.copy2(str(_op_src), str(norm_dir / "overlap_pairs.json"))
+                                results.append("overlap_pairs.json copied from Phase 1")
                         elif target == "parameters":
                             out_path = norm_dir / "parameters.csv"
                             # 기존 파라미터가 있으면 병합

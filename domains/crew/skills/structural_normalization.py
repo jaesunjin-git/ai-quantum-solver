@@ -415,6 +415,117 @@ class ParameterExtractor:
 # 메인 스킬 클래스
 # ════════════════════════════════════════
 
+
+
+class ConstraintSemanticMapper:
+    """constraints.yaml의 detection_hints를 기반으로
+    Phase 1 추출 파라미터의 context → 영문 param_id 매핑"""
+
+    def __init__(self):
+        self._rules = []  # [(param_id, keywords_ko, operator_hint, typical_range)]
+        self._load_rules()
+
+    def _load_rules(self):
+        """constraints.yaml에서 매핑 규칙 로드"""
+        import os
+        try:
+            import yaml
+        except ImportError:
+            return
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))))
+        domains_dir = os.path.join(base, "knowledge", "domains")
+        if not os.path.isdir(domains_dir):
+            return
+        for dname in os.listdir(domains_dir):
+            cpath = os.path.join(domains_dir, dname, "constraints.yaml")
+            if not os.path.isfile(cpath):
+                continue
+            try:
+                with open(cpath, "r", encoding="utf-8") as f:
+                    cdata = yaml.safe_load(f) or {}
+            except Exception:
+                continue
+            for section in ["hard", "soft"]:
+                for cid, cdef in (cdata.get(section) or {}).items():
+                    if not isinstance(cdef, dict):
+                        continue
+                    hints_ko = (cdef.get("detection_hints") or {}).get("ko", [])
+                    if not hints_ko:
+                        continue
+                    # single_param
+                    param_id = cdef.get("parameter")
+                    typical = cdef.get("typical_range", [])
+                    if param_id:
+                        self._rules.append((param_id, hints_ko, "<=", typical))
+                    # compound params
+                    for pid, pdef in (cdef.get("parameters") or {}).items():
+                        if not isinstance(pdef, dict):
+                            continue
+                        ptypical = pdef.get("typical_range", [])
+                        # sub-param에 독립 hints가 있으면 우선 사용
+                        sub_hints = (pdef.get("detection_hints") or {}).get("ko", [])
+                        effective_hints = sub_hints if sub_hints else hints_ko
+                        self._rules.append((pid, effective_hints, "<=", ptypical))
+                    # conditional trigger/consequence
+                    trigger = cdef.get("trigger") or {}
+                    if trigger.get("threshold_param"):
+                        self._rules.append((
+                            trigger["threshold_param"], hints_ko, ">",
+                            trigger.get("typical_threshold_range", [])
+                        ))
+                    consequence = cdef.get("consequence") or {}
+                    if consequence.get("parameter"):
+                        self._rules.append((
+                            consequence["parameter"], hints_ko, ">=",
+                            consequence.get("typical_range", [])
+                        ))
+        logger.info(f"ConstraintSemanticMapper: {len(self._rules)} rules loaded")
+
+    def map_param(self, param_name: str, context: str, value, unit: str = "") -> str:
+        """context와 value를 분석하여 가장 적합한 영문 param_id 반환.
+        매칭 실패 시 원래 param_name 반환."""
+        if not self._rules:
+            return param_name
+
+        text = f"{param_name} {context}".lower()
+        best_id = None
+        best_score = 0
+
+        for param_id, hints_ko, op_hint, typical_range in self._rules:
+            score = 0
+            for hint in hints_ko:
+                if hint in text:
+                    score += len(hint) * 2  # 긴 힌트일수록 높은 점수
+
+            if score == 0:
+                continue
+
+            # typical_range 내에 있으면 보너스
+            if typical_range and len(typical_range) == 2:
+                try:
+                    fval = float(value)
+                    if typical_range[0] <= fval <= typical_range[1]:
+                        score += 5
+                    elif typical_range[0] * 0.5 <= fval <= typical_range[1] * 1.5:
+                        score += 2
+                except (ValueError, TypeError):
+                    pass
+
+            if score > best_score:
+                best_score = score
+                best_id = param_id
+
+        return best_id if best_id and best_score >= 4 else param_name
+
+
+_semantic_mapper = None
+def _get_semantic_mapper():
+    global _semantic_mapper
+    if _semantic_mapper is None:
+        _semantic_mapper = ConstraintSemanticMapper()
+    return _semantic_mapper
+
 class StructuralNormalizationSkill:
     """
     Phase 1: 구조 정규화.
@@ -564,6 +675,34 @@ class StructuralNormalizationSkill:
             }
 
         # params 저장
+        # ── Semantic mapping: assign meaningful English param IDs ──
+        mapper = _get_semantic_mapper()
+        _used_ids = {}  # track assigned IDs to handle duplicates
+        for p in all_params:
+            original_name = p.get("param_name", "")
+            ctx = p.get("context", "")
+            val = p.get("value", "")
+            unit = p.get("unit", "")
+            mapped_id = mapper.map_param(original_name, ctx, val, unit)
+            if mapped_id != original_name:
+                # Handle duplicates: append _max, _min, _avg based on context
+                if mapped_id in _used_ids:
+                    ctx_lower = ctx.lower()
+                    if any(k in ctx_lower for k in ["평균", "average", "avg"]):
+                        mapped_id = f"{mapped_id}_avg"
+                    elif any(k in ctx_lower for k in ["최소", "min", "이상"]):
+                        mapped_id = f"{mapped_id}_min"
+                    elif any(k in ctx_lower for k in ["최대", "max", "이내", "이하"]):
+                        mapped_id = f"{mapped_id}_max"
+                    else:
+                        _used_ids[mapped_id] = _used_ids.get(mapped_id, 0) + 1
+                        mapped_id = f"{mapped_id}_{_used_ids[mapped_id]}"
+                _used_ids[mapped_id] = _used_ids.get(mapped_id, 0) + 1
+                p["semantic_id"] = mapped_id
+                logger.info(f"Semantic map: {original_name} -> {mapped_id} (ctx: {ctx[:50]})")
+            else:
+                p["semantic_id"] = original_name
+
         if all_params:
             params_df = pd.DataFrame(all_params)
             params_df.to_csv(str(phase1_dir / "parameters_raw.csv"), index=False, encoding="utf-8")

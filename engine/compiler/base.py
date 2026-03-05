@@ -335,6 +335,12 @@ class DataBinder:
                     matched = df[df["param_name"] == pid]
                     if len(matched) == 1:
                         val = matched.iloc[0][source_col]
+                        # 빈 값/NaN이면 default_value로 fallback
+                        import math
+                        if val is None or (isinstance(val, str) and val.strip() == '') or (isinstance(val, float) and math.isnan(val)):
+                            if default_val is not None:
+                                _logger.info(f"Parameter {pid!r}: CSV value empty, using default_value {default_val}")
+                                return default_val
                         _logger.info(f"Parameter {pid!r}: scalar {val} from param_name lookup")
                         return val
                     elif len(matched) > 1:

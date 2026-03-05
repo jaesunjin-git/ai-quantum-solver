@@ -1,0 +1,53 @@
+﻿# knowledge/domains/railway/reference_ranges.yaml
+# ============================================================
+# 서브도메인별 참고 범위
+# 용도: 사용자에게 "일반적으로 이 범위입니다" 안내용
+# 참조 시점: 문제 정의에서 사용자 확인 UI 생성 시
+#
+# 주의: 이 값은 하드코딩된 기본값이 아님.
+#       사용자 데이터에서 값을 추출하지 못했을 때
+#       "참고로 보통 이 범위입니다"라고 안내하는 용도.
+# ============================================================
+
+version: "2.0"
+
+urban_metro:
+  description: "도시철도/지하철 일반적 범위"
+  max_driving_minutes: {range: [240, 420], note: "운영사마다 상이"}
+  max_work_minutes: {range: [480, 720], note: "준비/정리 포함"}
+  prep_time_minutes: {range: [15, 50], note: "세분류 시 항목별 다름"}
+  cleanup_time_minutes: {range: [15, 50]}
+  min_break_minutes: {range: [20, 60]}
+  break_trigger_minutes: {range: [180, 300]}
+  night_rest_minutes: {range: [360, 600]}
+  max_total_stay_minutes: {range: [540, 780]}
+  max_wait_minutes: {range: [60, 240]}
+  min_turnaround_minutes: {range: [3, 15]}
+
+high_speed:
+  description: "고속철도 일반적 범위"
+  max_driving_minutes: {range: [300, 480]}
+  max_work_minutes: {range: [540, 780]}
+  prep_time_minutes: {range: [30, 60]}
+  cleanup_time_minutes: {range: [30, 60]}
+  min_break_minutes: {range: [30, 60]}
+  break_trigger_minutes: {range: [180, 300]}
+  night_rest_minutes: {range: [480, 600]}
+  max_total_stay_minutes: {range: [600, 840]}
+  max_wait_minutes: {range: [60, 300]}
+
+conventional:
+  description: "일반 여객철도 일반적 범위"
+  max_driving_minutes: {range: [300, 480]}
+  max_work_minutes: {range: [540, 780]}
+  prep_time_minutes: {range: [30, 60]}
+  cleanup_time_minutes: {range: [30, 60]}
+  min_break_minutes: {range: [30, 60]}
+  night_rest_minutes: {range: [480, 600]}
+
+freight:
+  description: "화물철도 일반적 범위"
+  max_driving_minutes: {range: [360, 540]}
+  max_work_minutes: {range: [600, 840]}
+  prep_time_minutes: {range: [30, 60]}
+  cleanup_time_minutes: {range: [30, 60]}

@@ -1,4 +1,4 @@
-"""
+﻿"""
 domains/crew/session.py
 ───────────────────────
 세션 상태 관리 모듈.
@@ -45,6 +45,10 @@ class SessionState:
     normalization_confirmed: bool = False
     data_normalized: bool = False
     normalized_data_summary: Optional[Dict] = None
+
+    # ── Structural Normalization Phase 1 ──
+    structural_normalization_done: bool = False
+    phase1_summary: Optional[Dict] = None
 
 
 
@@ -96,6 +100,9 @@ class SessionState:
         self.normalization_confirmed = False
         self.data_normalized = False
         self.normalized_data_summary = None
+
+        self.structural_normalization_done = False
+        self.phase1_summary = None
 
     def context_string(self) -> str:
         parts = []
@@ -233,6 +240,10 @@ def save_session_state(project_id: str, state: SessionState):
         row.normalization_mapping = json.dumps(state.normalization_mapping, ensure_ascii=False) if state.normalization_mapping else None
         row.normalized_data_summary = json.dumps(state.normalized_data_summary, ensure_ascii=False) if state.normalized_data_summary else None
 
+        # Structural Normalization Phase 1
+        row.structural_normalization_done = getattr(state, 'structural_normalization_done', False)
+        row.phase1_summary = json.dumps(state.phase1_summary, ensure_ascii=False) if getattr(state, 'phase1_summary', None) else None
+
         row.data_facts = json.dumps(state.data_facts, ensure_ascii=False) if state.data_facts else None
 
         # Version pointers
@@ -290,6 +301,10 @@ def load_session_state(project_id: str) -> Optional[SessionState]:
         state.normalization_confirmed = state.data_normalized
         state.normalization_mapping = json.loads(row.normalization_mapping) if getattr(row, 'normalization_mapping', None) else None
         state.normalized_data_summary = json.loads(row.normalized_data_summary) if getattr(row, 'normalized_data_summary', None) else None
+
+        # Structural Normalization Phase 1
+        state.structural_normalization_done = getattr(row, 'structural_normalization_done', False) or False
+        state.phase1_summary = json.loads(row.phase1_summary) if getattr(row, 'phase1_summary', None) else None
 
 
         # Version pointers
@@ -374,3 +389,4 @@ def get_session(project_id: str) -> CrewSession:
         _restore_history_from_db(project_id, session)
         _sessions[project_id] = session
     return _sessions[project_id]
+

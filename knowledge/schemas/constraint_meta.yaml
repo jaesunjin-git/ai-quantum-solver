@@ -1,0 +1,100 @@
+﻿# knowledge/schemas/constraint_meta.yaml
+# ============================================================
+# 제약조건 메타스키마 (Domain-Agnostic)
+# 모든 도메인 YAML의 constraints 섹션은 이 스키마를 따른다.
+# 새로운 도메인(aviation, bus, hospital 등)을 추가할 때
+# 동일한 constraint type 체계를 사용한다.
+# ============================================================
+
+version: "2.0"
+
+# ──────────────────────────────────────
+# 1. 제약조건 타입 정의
+# ──────────────────────────────────────
+constraint_types:
+
+  single_param:
+    description: "단일 파라미터와 단일 값의 비교"
+    required_fields: [parameter, operator]
+    optional_fields: [unit, typical_range, formulation]
+    value_source: "사용자 데이터 또는 사용자 입력에서 결정"
+    example: "듀티 내 총 승무시간 <= max_driving_minutes"
+
+  compound:
+    description: "여러 파라미터가 하나의 수식으로 결합"
+    required_fields: [parameters, formulation]
+    optional_fields: [typical_range]
+    value_source: "각 파라미터를 개별적으로 사용자 데이터/입력에서 결정"
+    example: "승무시간 + 준비시간 + 정리시간 <= max_work_minutes"
+
+  conditional:
+    description: "특정 조건이 성립할 때만 활성화되는 제약"
+    required_fields:
+      - trigger    # {metric, operator, threshold_param}
+      - consequence  # {parameter, operator}
+    optional_fields:
+      - typical_threshold_range
+      - typical_consequence_range
+    value_source: "trigger 임계값과 consequence 값 모두 사용자 데이터/입력에서 결정"
+    example: "IF 연속승무 > 4시간 THEN 식사휴식 >= 30분"
+
+  pairwise:
+    description: "두 개체(trip, duty, crew) 간 관계에서 발생하는 제약"
+    required_fields:
+      - entity_type    # trip_pair, duty_pair, crew_task
+      - relation       # time_overlap, spatial_connection, qualification_match
+      - computation    # {method, inputs}
+    optional_fields: [fallback_params]
+    value_source: "정규화된 데이터에서 자동 계산"
+    example: "trip_i.도착시각 + 공차회송(i->j) + 최소회차 <= trip_j.출발시각"
+
+  data_derived:
+    description: "데이터 분석을 통해 자동 생성되는 구조적 제약"
+    required_fields:
+      - derivation  # {method, inputs, outputs}
+    optional_fields: [user_adjustable_params]
+    value_source: "정규화된 데이터에서 자동 생성, 일부 파라미터는 사용자 조정 가능"
+    example: "듀티 후보 집합 크기 = trip 수 x multiplier"
+
+# ──────────────────────────────────────
+# 2. 제약조건 카테고리 정의
+# ──────────────────────────────────────
+constraint_categories:
+  hard:
+    description: "반드시 만족해야 하는 제약. 위반 시 해가 infeasible."
+  soft:
+    description: "가능한 만족시키되, 위반 시 목적함수에 페널티 부과."
+    requires: [weight_range]
+
+# ──────────────────────────────────────
+# 3. 데이터 연결 스키마
+# ──────────────────────────────────────
+data_link_schema:
+  description: >
+    각 제약조건이 어떤 데이터에서 값을 추출해야 하는지 명시.
+    도메인 YAML에서 제약조건마다 이 구조를 사용한다.
+  fields:
+    required_data_types:
+      description: "data_detection.yaml의 data_type 이름 목록"
+    detection_hints:
+      description: "데이터에서 이 제약 관련 정보를 찾기 위한 키워드 (다국어)"
+    extractable_from_data:
+      description: "데이터에서 코드로 직접 계산 가능한지 여부"
+      values: [true, false, partial]
+
+# ──────────────────────────────────────
+# 4. 제약조건 템플릿 연결 스키마
+# ──────────────────────────────────────
+template_schema:
+  description: >
+    수학 모델 생성 시 사용되는 제약조건 템플릿 구조.
+    도메인 YAML의 templates.yaml은 이 구조를 따른다.
+  fields:
+    name: "제약조건 고유 ID"
+    for_each: "반복 인덱스 (예: d in D, t in T)"
+    lhs: "좌변 - 변수, 합, 파라미터의 조합"
+    operator: "==, <=, >="
+    rhs: "우변 - 값, 파라미터, 변수의 조합"
+    category: "hard | soft"
+    expression: "사람이 읽을 수 있는 수식 표현"
+    requires_variables: "이 제약이 필요로 하는 결정변수 목록"

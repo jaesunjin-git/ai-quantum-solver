@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 """
 domains/crew/skills/problem_definition.py
 
@@ -485,13 +485,41 @@ class ProblemDefinitionSkill:
             "values": {param_name: {"value": None, "source": "user_input_required"}},
         }
 
+    def _find_best_cdata_for_param(self, param_name: str, fallback_cdata: dict) -> dict:
+        """파라미터가 독립 제약에서 정의되어 있으면 그 제약의 cdata 반환.
+        예: prep_time_minutes는 max_work_time의 sub-param이지만,
+            prep_cleanup_time 제약에서 독립 정의 → 그 hints가 더 정확."""
+        if not hasattr(self, '_dk_ref'):
+            return fallback_cdata
+        dk = self._dk_ref
+        if not dk:
+            return fallback_cdata
+
+        # hard constraints에서 이 param을 직접 정의하는 제약 찾기
+        for cname, cdef in dk.hard_constraints.items():
+            if not isinstance(cdef, dict):
+                continue
+            # single_param으로 직접 정의
+            if cdef.get("parameter") == param_name:
+                return cdef
+            # compound의 sub-param으로 정의 (다른 제약에서)
+            sub_params = cdef.get("parameters") or {}
+            if param_name in sub_params and cdef is not fallback_cdata:
+                # 이 제약의 hints가 더 구체적인지 확인
+                this_hints = (cdef.get("detection_hints") or {}).get("ko", [])
+                fall_hints = (fallback_cdata.get("detection_hints") or {}).get("ko", [])
+                if this_hints != fall_hints:
+                    return cdef
+
+        return fallback_cdata
     def _extract_compound(self, cname: str, cdata: dict, phase1_data: dict) -> dict:
         params = cdata.get("parameters", {})
         values = {}
         all_found = True
 
         for pname, pinfo in params.items():
-            value = self._search_phase1_params(pname, cdata, phase1_data)
+            better_cdata = self._find_best_cdata_for_param(pname, cdata)
+            value = self._search_phase1_params(pname, better_cdata, phase1_data)
             if value is not None:
                 values[pname] = {"value": value, "source": "phase1_data", "confidence": 0.8}
             else:
@@ -518,7 +546,13 @@ class ProblemDefinitionSkill:
         # consequence value
         consequence_param = consequence.get("parameter")
         if consequence_param:
-            val = self._search_phase1_params(consequence_param, cdata, phase1_data)
+            # Merge consequence hints (context_must, typical_range) into search cdata
+            conseq_cdata = dict(cdata)
+            if consequence.get("context_must"):
+                conseq_cdata["context_must"] = consequence["context_must"]
+            if consequence.get("typical_range"):
+                conseq_cdata["typical_range"] = consequence["typical_range"]
+            val = self._search_phase1_params(consequence_param, conseq_cdata, phase1_data)
             values[consequence_param] = {
                 "value": val,
                 "source": "phase1_data" if val is not None else "user_input_required",
@@ -609,7 +643,17 @@ class ProblemDefinitionSkill:
         return result
 
     def _search_phase1_params(self, param_name: str, cdata: dict, phase1_data: dict):
-        """Phase 1 파라미터에서 제약조건 값을 검색"""
+        """Phase 1 파라미터에서 제약조건 값을 검색 (v3 - context_must + typical_range)
+        
+        매칭 전략:
+        1. param_name 직접 매칭 (한글 이름)
+        2. 준비/정리 구분
+        3. detection_hints 키워드 매칭
+        4. context_must: 핵심 키워드가 context에 반드시 포함 (AND)
+        5. typical_range 범위 내 보너스, 범위 밖 페널티
+        6. 최대/최소/평균 context 힌트
+        7. 동점 후보 시 operator 기반 선택
+        """
         params_raw = phase1_data.get("params_raw", [])
         if not params_raw:
             return None
@@ -624,13 +668,42 @@ class ProblemDefinitionSkill:
         elif isinstance(hints, list):
             all_keywords.extend(h.lower() for h in hints)
 
-        # param_name에서 키워드 추출
-        param_words = set(param_name.lower().replace("_", " ").split())
-        stop_words = {"minutes", "min", "time", "per", "param", "max", "in"}
-        param_core = param_words - stop_words
+        # typical_range
+        typical_range = cdata.get("typical_range", [])
+        # compound params에서 개별 typical_range
+        for pid, pinfo in (cdata.get("parameters") or {}).items():
+            if pid == param_name and isinstance(pinfo, dict):
+                typical_range = pinfo.get("typical_range", typical_range)
+                break
+        # conditional trigger/consequence의 typical_range
+        trigger = cdata.get("trigger") or {}
+        if trigger.get("threshold_param") == param_name:
+            typical_range = trigger.get("typical_threshold_range", typical_range)
+        consequence = cdata.get("consequence") or {}
+        if consequence.get("parameter") == param_name:
+            typical_range = consequence.get("typical_range", typical_range)
 
-        best_match = None
-        best_score = 0
+        # operator/role 힌트
+        operator = cdata.get("operator", "")
+        role = ""
+        for pid, pinfo in (cdata.get("parameters") or {}).items():
+            if pid == param_name and isinstance(pinfo, dict):
+                role = pinfo.get("role", "")
+                break
+        is_max = operator in ("<=", "<") or "max" in param_name.lower() or "upper" in role
+        is_min = operator in (">=", ">") or "min" in param_name.lower() or "최소" in param_name
+        is_avg = "avg" in param_name.lower() or "average" in param_name.lower()
+
+        # 준비/정리 구분
+        is_prep = any(w in param_name.lower() for w in ["prep", "준비"])
+        is_cleanup = any(w in param_name.lower() for w in ["cleanup", "정리"])
+
+        # context_must: all_keywords 중 가장 구별력 있는 키워드를 AND 조건으로 사용
+        # 2글자 이상 키워드만 (단독 "최대" 같은 범용어 제외)
+        context_must = [kw for kw in all_keywords if len(kw) >= 2
+                        and kw not in ("최대", "최소", "시간", "제한", "limit")]
+
+        candidates = []
 
         for p in params_raw:
             pname = str(p.get("param_name", "")).lower()
@@ -640,31 +713,93 @@ class ProblemDefinitionSkill:
             if value is None:
                 continue
 
+            # 숫자 변환
+            try:
+                num_val = float(value)
+            except (ValueError, TypeError):
+                continue
+
+            # context_must 필터: 핵심 키워드 중 하나라도 context에 있어야 함
+            if context_must and not any(cm in context or cm in pname for cm in context_must):
+                continue
+
             score = 0
 
-            # param_name 직접 매칭
-            if param_name.lower() in pname or pname in param_name.lower():
-                score += 3
+            # 1. param_name 직접 매칭
+            if param_name.lower() == pname or param_name.lower() in pname:
+                score += 5
 
-            # 키워드 매칭
+            # 2. 준비/정리 구분
+            if is_prep and "준비" in pname:
+                score += 4
+            elif is_cleanup and "정리" in pname:
+                score += 4
+            elif is_prep and "정리" in pname and "준비" not in pname:
+                continue
+            elif is_cleanup and "준비" in pname and "정리" not in pname:
+                continue
+
+            # 3. detection_hints 키워드 매칭
             for kw in all_keywords:
-                if kw in pname or kw in context:
+                if kw in context:
+                    score += 1.5
+                elif kw in pname:
                     score += 1
 
-            # param 핵심어 매칭
-            for w in param_core:
-                if w in pname or w in context:
-                    score += 0.5
+            # 4. 최대/최소/평균 context 보너스
+            if is_max and any(w in context for w in ["이내", "이하", "최대", "상한"]):
+                score += 2
+            if is_min and any(w in context for w in ["이상", "최소", "하한"]):
+                score += 2
+            if is_avg and any(w in context for w in ["평균", "avg"]):
+                score += 2
 
-            if score > best_score:
-                best_score = score
-                best_match = value
+            # 5. typical_range 보너스/페널티
+            if typical_range and len(typical_range) == 2:
+                lo, hi = typical_range[0], typical_range[1]
+                if lo <= num_val <= hi:
+                    score += 3
+                elif lo * 0.5 <= num_val <= hi * 2:
+                    score += 1
+                else:
+                    score -= 2
 
-        return best_match if best_score >= 1.5 else None
+            if score >= 1.5:
+                candidates.append({"value": num_val, "score": score, "pname": pname})
 
-    # ──────────────────────────────────────
-    # 파라미터 수집
-    # ──────────────────────────────────────
+        if not candidates:
+            return None
+
+        # 최적 선택
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        top_score = candidates[0]["score"]
+        top_candidates = [c for c in candidates if c["score"] >= top_score * 0.9]
+
+        if len(top_candidates) == 1:
+            logger.info(
+                f"Phase1 match: {param_name} = {top_candidates[0]['value']}"
+                f" (score={top_candidates[0]['score']}, from={top_candidates[0]['pname']})"
+            )
+            return top_candidates[0]["value"]
+
+        # 동점 시 최대/최소/평균 선택
+        values = [c["value"] for c in top_candidates]
+        if is_max:
+            result = max(values)
+        elif is_min:
+            result = min(values)
+        elif is_avg:
+            result = round(sum(values) / len(values), 2)
+        else:
+            result = top_candidates[0]["value"]
+
+        logger.info(
+            f"Phase1 match: {param_name} = {result}"
+            f" ({len(top_candidates)} candidates, is_max={is_max}, is_min={is_min})"
+        )
+        return result
+
+
     def _collect_parameters(self, state, project_id: str, dk, constraints: dict) -> dict:
         """제약조건에서 필요한 파라미터를 종합하여 수집"""
         parameters = {}

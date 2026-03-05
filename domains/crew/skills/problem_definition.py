@@ -754,12 +754,22 @@ class ProblemDefinitionSkill:
                     score += 1
 
             # 4. 최대/최소/평균 context 보너스
-            if is_max and any(w in context for w in ["이내", "이하", "최대", "상한"]):
-                score += 2
-            if is_min and any(w in context for w in ["이상", "최소", "하한"]):
-                score += 2
+            if is_max:
+                if any(w in context for w in ["이내", "이하"]):
+                    score += 3
+                elif "최대" in context and "최대한" not in context:
+                    score += 2
+                if "평균" in context:
+                    score -= 2
+            if is_min:
+                if any(w in context for w in ["이상", "최소"]):
+                    score += 3
+                elif "하한" in context:
+                    score += 2
+                if "평균" in context:
+                    score -= 2
             if is_avg and any(w in context for w in ["평균", "avg"]):
-                score += 2
+                score += 3
 
             # 5. typical_range 보너스/페널티
             if typical_range and len(typical_range) == 2:

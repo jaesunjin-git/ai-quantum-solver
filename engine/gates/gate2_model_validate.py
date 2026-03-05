@@ -1120,7 +1120,19 @@ def _check_node_refs(node: Any, cname: str, side: str,
             has_source = bool(param_node.get("source_column") or param_node.get("source_file"))
         # 데이터 컬럼명과 일치하면 데이터 참조이므로 경고 불필요
         is_data_col = param_ref in data_col_names
-        if param_ref and param_ref not in param_names and not has_source and not is_data_col:
+        is_fuzzy_col = False
+        fuzzy_matched = None
+        if param_ref and not is_data_col and data_col_names:
+            fuzzy_matched = _fuzzy_match_column(param_ref, data_col_names)
+            if fuzzy_matched:
+                is_fuzzy_col = True
+                corrections[f"param_{param_ref}"] = {
+                    "type": "column_name_fix",
+                    "original": param_ref,
+                    "corrected": fuzzy_matched,
+                    "location": f"{cname}.{side}"
+                }
+        if param_ref and param_ref not in param_names and not has_source and not is_data_col and not is_fuzzy_col:
             warnings.append(
                 f"Constraint '{cname}' {side}: parameter '{param_ref}' 미정의"
             )

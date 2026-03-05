@@ -378,6 +378,38 @@ def build_constraint(
     if lhs_node is None or rhs_node is None:
         return []
 
+    # ── overlap_pairs 사전 필터링 지원 ──
+    overlap_pairs = con_def.get("_overlap_pairs")
+    if overlap_pairs:
+        import re as _re
+        # for_each에서 i, j 루프를 제거하고 나머지(d in D 등)만 남김
+        remaining_fe = for_each
+        for var in ("i", "j"):
+            remaining_fe = _re.sub(
+                rf"\b{var}\s+in\s+\w+\s*,?\s*", "", remaining_fe
+            ).strip().strip(",").strip()
+        extra_bindings = parse_for_each(remaining_fe, ctx) if remaining_fe else [{}]
+
+        constraints = []
+        for pair in overlap_pairs:
+            pair_bind = {"i": pair[0], "j": pair[1]}
+            for eb in extra_bindings:
+                binding = {**pair_bind, **eb}
+                try:
+                    lhs_val = eval_node(lhs_node, binding, ctx)
+                    rhs_val = eval_node(rhs_node, binding, ctx)
+                    constraints.append((lhs_val, op, rhs_val))
+                except Exception as e:
+                    logger.warning(
+                        f"Constraint eval failed for overlap binding {binding}: {e}"
+                    )
+        logger.info(
+            f"Overlap filter: {len(overlap_pairs)} pairs x "
+            f"{len(extra_bindings)} extra = {len(constraints)} constraints"
+        )
+        return constraints
+
+    # ── 기본 경로: 기존 for_each 파싱 ──
     bindings = parse_for_each(for_each, ctx)
     constraints = []
 

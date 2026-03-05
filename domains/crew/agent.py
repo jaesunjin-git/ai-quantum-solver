@@ -1,4 +1,4 @@
-"""
+﻿"""
 domains/crew/agent.py
 ─────────────────────
 CrewAgent 오케스트레이션 모듈.
@@ -54,6 +54,7 @@ from domains.crew.classifier import (
 # skills/ 패키지에서 분리된 스킬 함수 (Step 4 리팩토링)
 from domains.crew.skills.problem_definition import skill_problem_definition
 from domains.crew.skills.data_normalization import skill_data_normalization
+from domains.crew.skills.structural_normalization import skill_structural_normalization
 from domains.crew.skills.analyze import skill_analyze, skill_show_analysis
 from domains.crew.skills.general import skill_answer, skill_general, skill_ask_for_data
 from domains.crew.skills.math_model import skill_math_model, skill_show_math_model, handle_math_model_confirm
@@ -328,6 +329,7 @@ class CrewAgent:
         """intent에 따라 해당 Skill 핸들러를 실행"""
         handlers = {
             "ANALYZE": lambda s, p, m, pr: skill_analyze(self.model, s, p, m, pr),
+            "STRUCTURAL_NORMALIZATION": lambda s, p, m, pr: skill_structural_normalization(s, p, m, pr),
             "PROBLEM_DEFINITION": lambda s, p, m, pr: skill_problem_definition(self.model, s, p, m, pr),
             "DATA_NORMALIZATION": lambda s, p, m, pr: skill_data_normalization(self.model, s, p, m, pr),
             "SHOW_ANALYSIS": skill_show_analysis,
@@ -350,6 +352,7 @@ class CrewAgent:
         # Action intent 처리 후 target_tab 추가 (프론트엔드 자동 탭 전환용)
         intent_to_tab = {
             "ANALYZE": "analysis",
+            "STRUCTURAL_NORMALIZATION": "analysis",
             "PROBLEM_DEFINITION": "analysis",
             "DATA_NORMALIZATION": "analysis",
             "SHOW_ANALYSIS": "analysis",

@@ -1,0 +1,142 @@
+﻿# knowledge/domains/railway/templates.yaml
+# ============================================================
+# 수학 모델 제약조건 템플릿
+# 용도: 수학 모델 생성 단계에서 IR JSON 구성
+# 참조 시점: 수학 모델 생성 (MATH_MODEL)
+#
+# 원칙:
+#   - 하드코딩된 값 없음, param 참조만 존재
+#   - 실제 값은 confirmed_problem에서 바인딩
+# ============================================================
+
+version: "2.0"
+
+objective_templates:
+
+  minimize_duties:
+    type: minimize
+    description: "사용되는 듀티 수 최소화"
+    expression:
+      sum: {var: u, index: "[d]", over: "d in D"}
+    requires_variables:
+      - {name: u, type: binary, indices: [D], description: "듀티 d 활성화 여부"}
+
+  minimize_total_work:
+    type: minimize
+    description: "총 근무시간 최소화"
+    expression:
+      sum:
+        var: w
+        index: "[d]"
+        over: "d in D"
+        subtract: {var: z, index: "[d]"}
+
+  minimize_deadhead:
+    type: minimize
+    description: "총 공차회송시간 최소화"
+    expression:
+      sum: {var: dh, index: "[d]", over: "d in D"}
+    requires_variables:
+      - {name: dh, type: continuous, indices: [D], description: "듀티 d의 공차회송시간"}
+
+constraint_templates:
+
+  trip_coverage:
+    name: trip_coverage
+    for_each: "t in T"
+    lhs: {sum: {var: y, index: "[t,d]", over: "d in D"}}
+    operator: "=="
+    rhs: {value: 1}
+    category: hard
+    expression: "sum(y[t,d] for d in D) == 1"
+
+  duty_activation:
+    name: duty_activation
+    for_each: "t in T, d in D"
+    lhs: {var: {name: y, index: "[t,d]"}}
+    operator: "<="
+    rhs: {var: {name: u, index: "[d]"}}
+    category: hard
+    expression: "y[t,d] <= u[d]"
+    requires_variables:
+      - {name: u, type: binary, indices: [D]}
+
+  max_driving_time:
+    name: max_driving_time
+    for_each: "d in D"
+    lhs:
+      sum:
+        var: y
+        index: "[t,d]"
+        over: "t in T"
+        coeff: {param: {name: trip_duration, index: "[t]", source: "trips.trip_duration"}}
+    operator: "<="
+    rhs: {param: {name: max_driving_minutes}}
+    category: hard
+    expression: "sum(trip_duration[t] * y[t,d] for t in T) <= max_driving_minutes"
+
+  max_work_time:
+    name: max_work_time
+    for_each: "d in D"
+    lhs:
+      add:
+        - sum:
+            var: y
+            index: "[t,d]"
+            over: "t in T"
+            coeff: {param: {name: trip_duration, index: "[t]", source: "trips.trip_duration"}}
+        - param: {name: prep_time_minutes}
+        - param: {name: cleanup_time_minutes}
+    operator: "<="
+    rhs: {param: {name: max_work_minutes}}
+    category: hard
+    expression: "sum(duration[t]*y[t,d]) + prep + cleanup <= max_work_minutes"
+
+  max_total_stay_time:
+    name: max_total_stay_time
+    for_each: "d in D"
+    lhs: {subtract: [{var: {name: w, index: "[d]"}}, {var: {name: z, index: "[d]"}}]}
+    operator: "<="
+    rhs: {param: {name: max_total_stay_minutes}}
+    category: hard
+    expression: "w[d] - z[d] <= max_total_stay_minutes"
+    requires_variables:
+      - {name: z, type: integer, indices: [D], description: "듀티 시작시각"}
+      - {name: w, type: integer, indices: [D], description: "듀티 종료시각"}
+
+  duty_start_time:
+    name: duty_start_time
+    for_each: "d in D, t in T"
+    lhs: {var: {name: z, index: "[d]"}}
+    operator: "<="
+    rhs:
+      add:
+        - param: {name: trip_dep_time, index: "[t]", source: "trips.trip_dep_time"}
+        - multiply: [-1, {param: {name: prep_time_minutes}}]
+        - multiply: [{param: {name: M}}, {subtract: [1, {var: {name: y, index: "[t,d]"}}]}]
+    category: hard
+    expression: "z[d] <= dep_time[t] - prep + M*(1-y[t,d])"
+
+  duty_end_time:
+    name: duty_end_time
+    for_each: "d in D, t in T"
+    lhs: {var: {name: w, index: "[d]"}}
+    operator: ">="
+    rhs:
+      subtract:
+        - add:
+            - param: {name: trip_arr_time, index: "[t]", source: "trips.trip_arr_time"}
+            - param: {name: cleanup_time_minutes}
+        - multiply: [{param: {name: M}}, {subtract: [1, {var: {name: y, index: "[t,d]"}}]}]
+    category: hard
+    expression: "w[d] >= arr_time[t] + cleanup - M*(1-y[t,d])"
+
+  time_compatibility:
+    name: time_compatibility
+    for_each: "d in D, (i,j) in incompatible_pairs"
+    lhs: {add: [{var: {name: y, index: "[i,d]"}}, {var: {name: y, index: "[j,d]"}}]}
+    operator: "<="
+    rhs: {value: 1}
+    category: hard
+    expression: "y[i,d] + y[j,d] <= 1"
+    note: "incompatible_pairs는 pairwise computation에서 자동 생성"

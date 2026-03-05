@@ -1,0 +1,392 @@
+﻿# knowledge/domains/railway/constraints.yaml
+# ============================================================
+# 철도 도메인 제약조건 정의
+# 용도: 문제 정의 단계에서 적용 가능한 제약 판별, 값 추출
+# 참조 시점: 문제 정의 (PROBLEM_DEFINITION)
+#
+# 설계 원칙:
+#   - 수학 수식은 templates.yaml에, 여기에는 "무엇을, 왜" 만
+#   - 값은 없고, 구조와 참조만 정의
+#   - 모든 실제 값은 사용자 데이터 또는 사용자 입력에서 결정
+#   - type은 constraint_meta.yaml의 타입을 따름
+# ============================================================
+
+version: "2.0"
+
+hard:
+
+  # ─── 커버리지 ───
+  trip_coverage:
+    name_ko: "운행 커버리지"
+    type: single_param
+    description: "모든 운행은 정확히 하나의 듀티에 배정"
+    parameter: null
+    applicability: all
+    required_data_types: ["timetable"]
+    detection_hints:
+      ko: ["운행", "커버"]
+      en: ["trip", "coverage"]
+    extractable_from_data: false
+
+  # ─── 시간 제한 (단일) ───
+  max_driving_time:
+    name_ko: "최대 승무시간"
+    type: single_param
+    description: "하나의 듀티에서 실제 운전(승무) 시간 상한"
+    parameter: max_driving_minutes
+    operator: "<="
+    unit: minutes
+    typical_range: [240, 480]
+    applicability: all
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["최대", "승무시간", "운전시간", "운행시간"]
+      en: ["max", "driving", "time", "limit"]
+    extractable_from_data: partial
+
+  # ─── 시간 제한 (복합) ───
+  max_work_time:
+    name_ko: "최대 근무시간"
+    type: compound
+    description: "준비 + 승무 + 정리를 포함한 총 근무시간 상한"
+    parameters:
+      max_work_minutes: {role: upper_bound, unit: minutes, typical_range: [480, 780]}
+      prep_time_minutes: {role: addend, unit: minutes, typical_range: [10, 60]}
+      cleanup_time_minutes: {role: addend, unit: minutes, typical_range: [10, 60]}
+    applicability: all
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["최대", "근무시간", "총근무"]
+      en: ["max", "work", "total", "hours"]
+    extractable_from_data: partial
+
+  max_total_stay_time:
+    name_ko: "최대 체류시간"
+    type: single_param
+    description: "출근부터 퇴근까지의 총 체류시간(구속시간) 상한"
+    parameter: max_total_stay_minutes
+    operator: "<="
+    unit: minutes
+    typical_range: [540, 780]
+    applicability: all
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["체류", "구속", "출근", "퇴근", "총시간"]
+      en: ["total", "stay", "span", "elapsed"]
+    extractable_from_data: partial
+
+  # ─── 준비/정리 ───
+  prep_cleanup_time:
+    name_ko: "준비/정리 시간"
+    type: compound
+    description: >
+      근무 시작 전 준비시간과 종료 후 정리시간.
+      운영사마다 세분류가 다를 수 있음.
+    parameters:
+      prep_time_minutes: {role: duty_start_offset, unit: minutes, typical_range: [10, 60]}
+      cleanup_time_minutes: {role: duty_end_offset, unit: minutes, typical_range: [10, 60]}
+    expandable: true
+    expansion_detection_hints:
+      ko: ["출근준비", "교대준비", "교대정리", "퇴근정리", "중간교대"]
+      en: ["sign_on", "handover_prep", "handover_cleanup", "sign_off"]
+    applicability: all
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["준비", "정리", "시간"]
+      en: ["prep", "cleanup", "setup", "teardown"]
+    extractable_from_data: partial
+
+  # ─── 휴식/식사 ───
+  mandatory_break:
+    name_ko: "필수 휴식/식사"
+    type: conditional
+    description: "연속 승무가 일정 시간을 초과하면 식사·휴식 보장"
+    trigger:
+      metric: continuous_driving_time
+      operator: ">"
+      threshold_param: break_trigger_minutes
+      typical_threshold_range: [180, 300]
+    consequence:
+      parameter: min_break_minutes
+      operator: ">="
+      typical_range: [20, 60]
+    applicability: all
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["식사", "휴식", "연속", "승무"]
+      en: ["break", "meal", "continuous", "rest"]
+    extractable_from_data: partial
+
+  night_rest:
+    name_ko: "야간 휴식"
+    type: conditional
+    description: "야간 시간대를 포함하는 근무 후 최소 연속 휴식"
+    trigger:
+      metric: duty_includes_night_hours
+      operator: "=="
+      threshold_param: night_definition_start
+      typical_threshold_range: [1320, 1440]
+      secondary_param: night_definition_end
+      typical_secondary_range: [300, 420]
+    consequence:
+      parameter: night_rest_minutes
+      operator: ">="
+      typical_range: [360, 600]
+    applicability: all
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["야간", "심야", "휴식", "연속휴식"]
+      en: ["night", "rest", "overnight"]
+    extractable_from_data: partial
+
+  # ─── 대기시간 ───
+  max_wait_time:
+    name_ko: "최대 대기시간"
+    type: single_param
+    description: "듀티 내 1회 연속 대기시간의 상한"
+    parameter: max_wait_minutes
+    operator: "<="
+    unit: minutes
+    typical_range: [60, 300]
+    applicability: all
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["대기", "최대", "대기시간"]
+      en: ["wait", "idle", "gap", "maximum"]
+    extractable_from_data: partial
+
+  total_wait_time:
+    name_ko: "총 대기시간 제한"
+    type: single_param
+    description: "듀티 내 총 대기시간의 상한"
+    parameter: max_total_wait_minutes
+    operator: "<="
+    unit: minutes
+    typical_range: [120, 480]
+    applicability: all
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["총대기", "합계", "대기"]
+      en: ["total", "wait", "aggregate"]
+    extractable_from_data: partial
+
+  # ─── 분리근무 ───
+  split_duty:
+    name_ko: "분리근무 제약"
+    type: conditional
+    description: "대기시간이 임계값을 초과하면 분리근무로 분류, 추가 제약 적용"
+    trigger:
+      metric: single_wait_time
+      operator: ">"
+      threshold_param: split_duty_threshold_minutes
+      typical_threshold_range: [90, 180]
+    consequence:
+      parameter: split_duty_max_total_stay_minutes
+      operator: "<="
+      typical_range: [720, 960]
+    applicability: all
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["분리", "근무", "분할"]
+      en: ["split", "duty", "broken"]
+    extractable_from_data: partial
+
+  # ─── 자격/역량 ───
+  qualification:
+    name_ko: "자격 요건"
+    type: pairwise
+    description: "승무원 자격이 해당 노선/열차 요건과 일치해야 배정 가능"
+    entity_type: crew_task
+    relation: qualification_match
+    computation:
+      method: "check_qualification_matrix"
+      inputs: ["crew_info.qualification", "timetable.required_qualification"]
+    fallback_params:
+      assume_all_qualified: {description: "자격 데이터 없으면 전원 보유 가정", default: true}
+    applicability:
+      conditions: ["crew_info에 qualification 컬럼 존재"]
+    required_data_types: ["crew_info", "timetable"]
+    detection_hints:
+      ko: ["자격", "면허", "등급"]
+      en: ["qualification", "license", "grade"]
+    extractable_from_data: true
+
+  # ─── 시간 호환성 (쌍별) ───
+  time_compatibility:
+    name_ko: "시간 호환성"
+    type: pairwise
+    description: "시간이 겹치는 두 운행은 같은 듀티에 배정 불가"
+    entity_type: trip_pair
+    relation: time_overlap
+    computation:
+      method: "build_incompatibility_pairs"
+      inputs: ["trips.dep_time", "trips.arr_time"]
+    applicability: all
+    required_data_types: ["timetable"]
+    detection_hints:
+      ko: ["중복", "겹침", "호환"]
+      en: ["overlap", "compatibility", "conflict"]
+    extractable_from_data: true
+
+  # ─── 연결 가능성 (쌍별) ───
+  trip_connection:
+    name_ko: "운행 연결 가능성"
+    type: pairwise
+    description: "같은 듀티 내 연속 운행 간 물리적 연결이 가능해야 함"
+    entity_type: trip_pair
+    relation: spatial_temporal_connection
+    computation:
+      method: "build_connection_feasibility"
+      inputs:
+        - "trips.arr_time"
+        - "trips.dep_time"
+        - "trips.arr_station"
+        - "trips.dep_station"
+        - "deadhead_matrix"
+        - "min_turnaround_minutes"
+    user_adjustable_params:
+      min_turnaround_minutes: {unit: minutes, typical_range: [3, 15]}
+    applicability: all
+    required_data_types: ["timetable"]
+    detection_hints:
+      ko: ["연결", "회차", "접속", "공차"]
+      en: ["connection", "turnaround", "deadhead"]
+    extractable_from_data: true
+
+  # ─── 데이터 유도 ───
+  deadhead_matrix:
+    name_ko: "공차회송 시간 행렬"
+    type: data_derived
+    description: "역 간 비운행 이동 소요시간 행렬"
+    derivation:
+      method: "compute_deadhead_matrix"
+      inputs: ["trips.stations", "network_topology"]
+      outputs: ["deadhead_time[station_a, station_b]"]
+      strategies:
+        from_timetable: "운행시간에서 역 간 이동시간 역산"
+        from_user_input: "사용자가 직접 제공"
+        zero_if_same_station: "동일역=0, 종점간=편도 운행시간"
+    user_adjustable_params:
+      deadhead_strategy:
+        options: ["from_timetable", "from_user_input", "zero_if_same_station"]
+        default: "from_timetable"
+    applicability: all
+    required_data_types: ["timetable"]
+    extractable_from_data: true
+
+  duty_candidate_set:
+    name_ko: "듀티 후보 집합"
+    type: data_derived
+    description: "최적화를 위한 듀티 후보의 크기와 구성"
+    derivation:
+      method: "generate_duty_candidates"
+      inputs: ["trip_count", "network_topology"]
+      outputs: ["candidate_set_size", "max_trips_per_duty"]
+    user_adjustable_params:
+      candidate_multiplier: {typical_range: [1.2, 3.0], default: 1.5}
+      max_trips_per_duty: {typical_range: [2, 12]}
+    applicability: all
+    required_data_types: ["timetable"]
+    extractable_from_data: true
+
+  big_m_constant:
+    name_ko: "Big-M 상수"
+    type: data_derived
+    description: "선형화에 사용하는 충분히 큰 수"
+    derivation:
+      method: "compute_big_m"
+      inputs: ["max_time_in_data"]
+      outputs: ["M"]
+    applicability: all
+    required_data_types: ["timetable"]
+    extractable_from_data: true
+
+  # ─── 기지 제약 ───
+  depot_constraint:
+    name_ko: "승무 기지 출퇴근 제약"
+    type: compound
+    description: "듀티의 시작/종료 역이 소속 기지에서 출퇴근 가능해야 함"
+    parameters:
+      allowed_start_stations: {role: set, description: "듀티 시작 가능 역"}
+      allowed_end_stations: {role: set, description: "듀티 종료 가능 역"}
+    applicability:
+      conditions: ["crew_info에 depot 정보 존재", "multi_line에서 특히 중요"]
+    required_data_types: ["crew_info", "timetable"]
+    detection_hints:
+      ko: ["기지", "사업소", "소속", "출퇴근"]
+      en: ["depot", "base", "home"]
+    extractable_from_data: partial
+
+  consecutive_work_days:
+    name_ko: "연속근무일 제한"
+    type: single_param
+    description: "연속 근무 가능한 최대 일수"
+    parameter: max_consecutive_work_days
+    operator: "<="
+    unit: days
+    typical_range: [4, 7]
+    applicability:
+      conditions: ["roster_assignment 단계에서 주로 적용"]
+    required_data_types: ["work_regulations"]
+    detection_hints:
+      ko: ["연속", "근무일"]
+      en: ["consecutive", "work", "days"]
+    extractable_from_data: partial
+
+soft:
+
+  workload_balance:
+    name_ko: "업무량 균형"
+    type: single_param
+    description: "듀티 간 근무시간 편차 최소화"
+    weight_range: [0.05, 1.0]
+    applicability: all
+    detection_hints: {ko: ["균형", "공평", "편차"], en: ["balance", "fairness"]}
+
+  minimize_deadhead:
+    name_ko: "공차회송 최소화"
+    type: single_param
+    description: "비운행 이동 시간 최소화"
+    weight_range: [0.05, 1.0]
+    applicability: all
+    detection_hints: {ko: ["공차", "회송", "최소"], en: ["deadhead", "minimize"]}
+
+  minimize_split_duties:
+    name_ko: "분리근무 최소화"
+    type: single_param
+    description: "분리근무 수 최소화"
+    weight_range: [0.05, 0.5]
+    applicability: all
+    detection_hints: {ko: ["분리", "근무", "최소"], en: ["split", "minimize"]}
+
+  depot_proximity:
+    name_ko: "기지 근접성"
+    type: single_param
+    description: "듀티 시작/종료지가 소속 기지에 가까울수록 유리"
+    weight_range: [0.01, 0.3]
+    applicability: {conditions: ["crew_info에 depot 정보 존재"]}
+    detection_hints: {ko: ["기지", "근접"], en: ["depot", "proximity"]}
+
+  preference_satisfaction:
+    name_ko: "선호도 반영"
+    type: single_param
+    description: "승무원 근무 선호 반영"
+    weight_range: [0.01, 0.3]
+    applicability: {conditions: ["preference_data 존재"]}
+    detection_hints: {ko: ["선호", "희망"], en: ["preference"]}
+
+  minimize_total_wait:
+    name_ko: "총 대기시간 최소화"
+    type: single_param
+    description: "전체 듀티의 대기시간 합계 최소화"
+    weight_range: [0.05, 0.5]
+    applicability: all
+    detection_hints: {ko: ["대기", "최소"], en: ["wait", "minimize"]}
+
+  drive_time_balance:
+    name_ko: "승무시간 균등"
+    type: single_param
+    description: "듀티 간 승무시간 편차 최소화"
+    weight_range: [0.05, 0.5]
+    applicability: all
+    detection_hints: {ko: ["승무", "균등", "평균"], en: ["driving", "balance"]}

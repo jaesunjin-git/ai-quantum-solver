@@ -502,7 +502,7 @@ def run(math_model: Dict,
         lhs = c.get("lhs", {})
         rhs = c.get("rhs", {})
         for side_name, side in [("lhs", lhs), ("rhs", rhs)]:
-            _check_node_refs(side, cname, side_name, var_ids, param_names, warnings, data_column_names)
+            _check_node_refs(side, cname, side_name, var_ids, param_names, warnings, corrections, data_column_names)
 
         # for_each에서 참조하는 set 검증
         for_each = c.get("for_each", "")
@@ -1093,7 +1093,7 @@ def _validate_set(set_def: Dict,
 
 def _check_node_refs(node: Any, cname: str, side: str,
                      var_ids: set, param_names: set,
-                     warnings: List[str],
+                     warnings: List[str], corrections: Dict[str, Any],
                      data_col_names: set = None):
     """노드에서 참조하는 변수/파라미터가 정의되어 있는지 재귀 검사"""
     if not isinstance(node, dict):
@@ -1142,7 +1142,7 @@ def _check_node_refs(node: Any, cname: str, side: str,
         sum_node = node["sum"]
         if isinstance(sum_node, dict):
             if "coeff" in sum_node and sum_node["coeff"]:
-                _check_node_refs(sum_node["coeff"], cname, side, var_ids, param_names, warnings, data_col_names)
+                _check_node_refs(sum_node["coeff"], cname, side, var_ids, param_names, warnings, corrections, data_col_names)
 
     # subtract, add, multiply 노드
     for op_key in ["subtract", "add", "multiply"]:
@@ -1150,9 +1150,9 @@ def _check_node_refs(node: Any, cname: str, side: str,
             sub = node[op_key]
             if isinstance(sub, list):
                 for item in sub:
-                    _check_node_refs(item, cname, side, var_ids, param_names, warnings, data_col_names)
+                    _check_node_refs(item, cname, side, var_ids, param_names, warnings, corrections, data_col_names)
             elif isinstance(sub, dict):
-                _check_node_refs(sub, cname, side, var_ids, param_names, warnings, data_col_names)
+                _check_node_refs(sub, cname, side, var_ids, param_names, warnings, corrections, data_col_names)
 
 
 def _fuzzy_match_column(target: str, available: set) -> Optional[str]:

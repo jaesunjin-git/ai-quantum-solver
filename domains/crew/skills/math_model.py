@@ -226,6 +226,27 @@ async def skill_math_model(model, session: CrewSession, project_id: str, message
             from engine.gates.gate1_data_profile import run as run_gate1
             data_profile = run_gate1(binder._dataframes)
             gate2_result = run_gate2(model, data_profile=data_profile, dataframes=binder._dataframes)
+
+            # ★ Gate2 corrections를 모델에 실제 적용 (column_name_fix)
+            if gate2_result.get("corrections"):
+                import json as _json
+                model_str = _json.dumps(model, ensure_ascii=False)
+                applied_count = 0
+                for ckey, cval in gate2_result["corrections"].items():
+                    if cval.get("type") == "column_name_fix":
+                        old_name = cval["old"]
+                        new_name = cval["new"]
+                        # JSON 문자열에서 정확한 값 치환 ("old_name" -> "new_name")
+                        old_token = f'\"' + old_name + f'\"'
+                        new_token = f'\"' + new_name + f'\"'
+                        if old_token in model_str:
+                            model_str = model_str.replace(old_token, new_token)
+                            applied_count += 1
+                            logger.info(f"Applied correction: {old_name} -> {new_name}")
+                if applied_count > 0:
+                    model = _json.loads(model_str)
+                    logger.info(f"Gate2 corrections applied: {applied_count} column name fixes")
+
             logger.info(
                 f"Gate2 (attempt {attempt}): valid={gate2_result['valid']}, "
                 f"errors={len(gate2_result['errors'])}, "

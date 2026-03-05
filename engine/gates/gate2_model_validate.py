@@ -1122,7 +1122,7 @@ def _check_node_refs(node: Any, cname: str, side: str,
         is_data_col = param_ref in data_col_names
         is_fuzzy_col = False
         fuzzy_matched = None
-        if param_ref and not is_data_col and data_col_names:
+        if param_ref and not is_data_col and data_col_names and param_ref not in param_names:
             fuzzy_matched = _fuzzy_match_column(param_ref, data_col_names)
             if fuzzy_matched:
                 is_fuzzy_col = True

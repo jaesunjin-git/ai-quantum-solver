@@ -1,4 +1,4 @@
-"""
+﻿"""
 engine/gates/gate2_model_validate.py
 ────────────────────────────────────
 Gate 2: 수학 모델 유효성 검증
@@ -1029,6 +1029,12 @@ def run(math_model: Dict,
         for i, w in enumerate(warnings):
             logger.warning(f"Gate2 warn   [{i+1}/{len(warnings)}]: {w}")
 
+
+    # ★ 구조 검증: for_each 누락, param index 누락 자동 교정
+    struct_fixes = _fix_constraint_structure(math_model, corrections, warnings)
+    if struct_fixes > 0:
+        corrections['structural_fixes'] = struct_fixes
+
     result = {
         "valid": is_valid,
         "errors": errors,
@@ -1235,3 +1241,101 @@ def to_text_summary(result: Dict) -> str:
             lines.append(f"  - {key}: {val['old']} → {val['new']} ({val['reason']})")
 
     return "\n".join(lines)
+
+
+def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str]):
+    """
+    Gate2 구조 검증: LLM이 생성한 제약식의 구조적 결함을 자동 교정.
+    1) source_file이 있는 param에 index 누락 -> [루프변수] 추가
+    2) 제약 내부에서 [i,d] 참조하는데 for_each에 i in I 누락 -> 추가
+    3) expression 문자열의 옛 컬럼명 치환
+    """
+    import json as _json
+
+    # 데이터 소스 파라미터 식별 (source_file 또는 source_column이 있는 param)
+    constraints = model.get("constraints", [])
+    sets_by_id = {}
+    for s in model.get("sets", []):
+        sets_by_id[s.get("id", "")] = s
+
+    fix_count = 0
+
+    for con in constraints:
+        cname = con.get("name", "unknown")
+        for_each = con.get("for_each", "")
+        con_json = _json.dumps(con, ensure_ascii=False)
+
+        # --- Step 1: for_each 누락 루프 변수 추가 ---
+        # 제약 JSON에서 사용된 인덱스 변수 탐지
+        index_refs = set(re.findall(r'\[([a-z])(?:,[a-z])*\]', con_json))
+        # for_each에서 이미 선언된 변수
+        declared_vars = set(re.findall(r'(\w+)\s+in\s+(\w+)', for_each))
+        declared_idx = {v[0] for v in declared_vars}
+
+        for idx_var in index_refs:
+            if idx_var not in declared_idx:
+                # 이 변수에 맞는 set 찾기 (i->I, d->D, j->J)
+                set_id = idx_var.upper()
+                if set_id in sets_by_id:
+                    new_loop = f"{idx_var} in {set_id}"
+                    if for_each:
+                        con["for_each"] = f"{new_loop}, {for_each}"
+                    else:
+                        con["for_each"] = new_loop
+                    for_each = con["for_each"]
+                    fix_count += 1
+                    corrections[f"struct_for_each_{cname}_{idx_var}"] = {
+                        "type": "for_each_fix",
+                        "old": for_each,
+                        "new": con["for_each"],
+                    }
+                    logger.info(f"Struct fix [{cname}]: added '{new_loop}' to for_each")
+
+        # --- Step 2: source_file 있는 param에 index 누락 -> 추가 ---
+        def fix_param_nodes(node, constraint_name):
+            nonlocal fix_count
+            if not isinstance(node, dict):
+                return
+            if "param" in node and isinstance(node["param"], dict):
+                p = node["param"]
+                has_source = bool(p.get("source_file") or p.get("source_column"))
+                has_index = bool(p.get("index"))
+                if has_source and not has_index:
+                    # for_each에서 첫 번째 루프 변수를 인덱스로 사용
+                    fe = con.get("for_each", "")
+                    loop_vars = re.findall(r'(\w+)\s+in\s+(\w+)', fe)
+                    if loop_vars:
+                        idx_var = loop_vars[0][0]
+                        p["index"] = f"[{idx_var}]"
+                        fix_count += 1
+                        pname = p.get("name", "?")
+                        corrections[f"struct_index_{constraint_name}_{pname}"] = {
+                            "type": "param_index_fix",
+                            "old": "no index",
+                            "new": p["index"],
+                        }
+                        logger.info(f"Struct fix [{constraint_name}]: param '{pname}' index set to '{p["index"]}'")
+            # 재귀 탐색
+            for key in ["lhs", "rhs", "coeff"]:
+                if key in node:
+                    fix_param_nodes(node[key], constraint_name)
+            for key in ["add", "subtract", "multiply"]:
+                if key in node and isinstance(node[key], list):
+                    for item in node[key]:
+                        fix_param_nodes(item, constraint_name)
+            if "sum" in node and isinstance(node["sum"], dict):
+                fix_param_nodes(node["sum"], constraint_name)
+                if "coeff" in node["sum"]:
+                    fix_param_nodes(node["sum"]["coeff"], constraint_name)
+
+        fix_param_nodes(con.get("lhs", {}), cname)
+        fix_param_nodes(con.get("rhs", {}), cname)
+
+    if fix_count > 0:
+        logger.info(f"Struct validation: {fix_count} structural fixes applied")
+    else:
+        logger.info("Struct validation: no structural fixes needed")
+
+    return fix_count
+
+

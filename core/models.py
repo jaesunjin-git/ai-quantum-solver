@@ -1,4 +1,4 @@
-from sqlalchemy import Float,  func,  Column, Integer, String, Text, Boolean, JSON, ForeignKey, DateTime
+﻿from sqlalchemy import Float,  func,  Column, Integer, String, Text, Boolean, JSON, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from .database import Base
 import datetime
@@ -118,6 +118,14 @@ class SessionStateDB(Base):
     normalization_mapping = Column(Text, nullable=True)
     normalized_data_summary = Column(Text, nullable=True)
 
+    # Structural Normalization (Phase 1) – TASK 2-A
+    structural_normalization_done = Column(Boolean, default=False)
+    phase1_summary = Column(Text, nullable=True)
+
+    # Constraint Confirmation – TASK 3
+    constraints_confirmed = Column(Boolean, default=False)
+    confirmed_constraints = Column(Text, nullable=True)
+
     # 도메인 정보
     detected_domain = Column(String, nullable=True)
     domain_confidence = Column(String, nullable=True)
@@ -199,3 +207,4 @@ class RunResultDB(Base):
 
     project = relationship("ProjectDB")
     model_version = relationship("ModelVersionDB")
+

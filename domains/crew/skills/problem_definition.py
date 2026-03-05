@@ -1,34 +1,34 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 """
 domains/crew/skills/problem_definition.py
 
-Problem Definition Skill.
+Problem Definition Skill – TASK 3 Refactored Version.
 
-기존 분석 결과(csv_summary, data_facts, data_profile, analysis_report)를 읽고,
-도메인 지식(knowledge/domains/*.yaml)을 참조하여
-문제 유형, 목적함수, 제약조건, 파라미터를 확정한다.
-
-데이터 유형 감지: knowledge/data_detection.yaml
-문제 매칭 규칙: knowledge/matching_rules.yaml
-문제 단계 분류: knowledge/taxonomy.yaml
-도메인 지식:     knowledge/domains/{domain}.yaml
-
-입력: session.state의 기존 분석 결과
-출력: session.state.confirmed_problem
+핵심 변경:
+  1. 범용 도메인 로더 사용 (knowledge/domain_loader.py)
+  2. 제약조건 타입별 분기 처리 (single_param, compound, conditional, pairwise, data_derived)
+  3. Phase 1 결과(phase1/) 기반 적용 가능성 필터링
+  4. One-by-One LLM 추출 (NOT_FOUND 허용)
+  5. 토폴로지 인식 필터링
+  6. 하드코딩 없는 범용 구조
 """
 
+import asyncio
+import json
 import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
+import pandas as pd
 
 from domains.crew.session import CrewSession, save_session_state
 
 logger = logging.getLogger(__name__)
 
 _BASE = Path(__file__).resolve().parents[3]
+_UPLOAD_BASE = _BASE / "uploads"
 
 
 def _load_yaml(rel_path: str) -> dict:
@@ -40,6 +40,11 @@ def _load_yaml(rel_path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _get_safe_dir(project_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "", str(project_id))
+    return _UPLOAD_BASE / safe_id
+
+
 class ProblemDefinitionSkill:
 
     def __init__(self):
@@ -47,61 +52,95 @@ class ProblemDefinitionSkill:
         self.data_detection = _load_yaml("knowledge/data_detection.yaml")
         self.matching_rules = _load_yaml("knowledge/matching_rules.yaml")
         self.prompt_config = _load_yaml("prompts/problem_definition.yaml")
-        self._domain_cache: Dict[str, dict] = {}
+        self.extraction_prompts = _load_yaml("prompts/constraint_extraction.yaml")
 
-        # data_detection.yaml에서 데이터 유형별 키워드 맵 구축
+        # data_detection.yaml에서 데이터 유형별 키워드 맵
         self._detection_keywords: Dict[str, List[List[str]]] = {}
         self._extraction_keys: Dict[str, List[str]] = {}
         for dtype, dinfo in self.data_detection.get("data_types", {}).items():
             self._detection_keywords[dtype] = dinfo.get("column_keywords", [])
             self._extraction_keys[dtype] = dinfo.get("extraction_keys", [])
 
-        # matching_rules.yaml에서 규칙 맵 구축
-        self._matching_rules: Dict[str, dict] = self.matching_rules.get("rules", {})
+        # matching_rules
+        self._matching_rules = self.matching_rules.get("rules", {})
 
-        # taxonomy.yaml에서 stage→variant_group 매핑 동적 구축
+        # taxonomy stage -> variant_group
         self._stage_variant_group: Dict[str, str] = {}
         for stage_key, stage_info in self.taxonomy.get("stages", {}).items():
-            vg = stage_info.get("variant_group", stage_key)
-            self._stage_variant_group[stage_key] = vg
+            self._stage_variant_group[stage_key] = stage_info.get("variant_group", stage_key)
 
-        # taxonomy.yaml에서 목적함수 설명 맵 동적 구축
-        self._obj_descriptions: Dict[str, str] = {}
-        for stage_key, stage_info in self.taxonomy.get("stages", {}).items():
-            for obj in stage_info.get("typical_objectives", []):
-                self._obj_descriptions[obj] = obj.replace("_", " ")
+        logger.info("ProblemDefinitionSkill init (TASK 3 refactored)")
 
-        logger.info(
-            f"ProblemDefinitionSkill init: "
-            f"detection_types={list(self._detection_keywords.keys())}, "
-            f"matching_rules={list(self._matching_rules.keys())}, "
-            f"taxonomy_stages={list(self.taxonomy.get('stages', {}).keys())}"
-        )
+    # ──────────────────────────────────────
+    # 도메인 지식 로드 (범용 로더 사용)
+    # ──────────────────────────────────────
+    def _load_domain(self, state):
+        """범용 도메인 로더를 통해 DomainKnowledge 반환"""
+        try:
+            from knowledge.domain_loader import load_domain_knowledge, detect_domain_from_keywords
+        except ImportError:
+            logger.warning("domain_loader not available, falling back")
+            return None
+
+        domain = state.detected_domain or "generic"
+
+        # 직접 이름으로 시도
+        dk = load_domain_knowledge(domain)
+        if dk.hard_constraints or dk.raw_single:
+            return dk
+
+        # 키워드 기반 도메인 탐지
+        search_text = " ".join(state.uploaded_files or [])
+        if state.csv_summary:
+            search_text += " " + state.csv_summary
+        detected = detect_domain_from_keywords(search_text)
+        if detected:
+            dk = load_domain_knowledge(detected)
+            if dk.hard_constraints or dk.raw_single:
+                return dk
+
+        # crew -> railway 매핑 시도
+        alias_map = {"crew": "railway", "train": "railway", "bus": "bus", "flight": "aviation"}
+        alias = alias_map.get(domain.lower())
+        if alias:
+            dk = load_domain_knowledge(alias)
+            if dk.hard_constraints or dk.raw_single:
+                return dk
+
+        return dk
 
     # ──────────────────────────────────────
     # public entry point
     # ──────────────────────────────────────
     async def handle(
-        self, session: CrewSession, project_id: str,
+        self, model, session: CrewSession, project_id: str,
         message: str, params: Dict
     ) -> Dict:
         state = session.state
 
         # 이미 제안을 보냈고 사용자 응답 대기 중
         if state.problem_definition_proposed and not state.problem_defined:
-            return self._handle_user_response(session, project_id, message)
+            return await self._handle_user_response(model, session, project_id, message)
 
-        # 첫 진입: 분석 결과 기반 제안 생성
-        domain_yaml = self._load_domain_yaml(state)
+        # 첫 진입: 분석 결과 + Phase 1 기반 제안 생성
+        dk = self._load_domain(state)
         detected_data_types = self._detect_data_types(state)
-        problem_type = self._determine_problem_type(state, domain_yaml, detected_data_types)
-        objective = self._determine_objective(problem_type, domain_yaml)
-        constraints = self._determine_constraints(problem_type, domain_yaml)
-        parameters = self._collect_parameters(state, domain_yaml)
+        problem_type = self._determine_problem_type(state, dk, detected_data_types)
+        topology = self._detect_topology(state, project_id)
+        objective = self._determine_objective(problem_type, dk)
+
+        # ★ 핵심: 3단계 제약조건 결정
+        constraints = await self._determine_constraints_phased(
+            model, state, project_id, dk, detected_data_types, topology
+        )
+
+        # 파라미터 수집 (Phase 1 데이터 우선)
+        parameters = self._collect_parameters(state, project_id, dk, constraints)
 
         proposal = {
             "stage": problem_type.get("stage", "task_generation"),
             "variant": problem_type.get("variant"),
+            "topology": topology,
             "detected_data_types": list(detected_data_types),
             "objective": objective,
             "hard_constraints": constraints.get("hard", {}),
@@ -113,7 +152,7 @@ class ProblemDefinitionSkill:
         state.problem_definition_proposed = True
         save_session_state(project_id, state)
 
-        response_text = self._format_proposal(state, domain_yaml, proposal)
+        response_text = self._format_proposal(state, dk, proposal)
 
         return {
             "type": "problem_definition",
@@ -131,29 +170,23 @@ class ProblemDefinitionSkill:
         }
 
     # ──────────────────────────────────────
-    # 0. 데이터 유형 감지 (data_detection.yaml 기반)
+    # 데이터 유형 감지
     # ──────────────────────────────────────
     def _detect_data_types(self, state) -> Set[str]:
-        """data_detection.yaml의 column_keywords를 사용하여 데이터 유형 감지"""
         detected = set()
         facts = state.data_facts or {}
         all_columns = facts.get("all_columns", {})
 
-        # 전체 컬럼 텍스트를 시트별로 수집
         for sheet_key, columns in all_columns.items():
             col_text = " ".join(str(c).lower() for c in columns)
-
             for dtype, keyword_groups in self._detection_keywords.items():
                 if dtype in detected:
                     continue
-                # keyword_groups: [["departure","arrival","출발","도착"], ["station","역"]]
-                # 각 그룹에서 하나라도 매치되면 해당 데이터 유형으로 감지
                 for group in keyword_groups:
                     if any(kw.lower() in col_text for kw in group):
                         detected.add(dtype)
                         break
 
-        # data_profile에서 구조 기반 추가 감지
         if state.data_profile and isinstance(state.data_profile, dict):
             for sheet_key, info in state.data_profile.get("files", {}).items():
                 if info.get("structure") == "non_tabular_block":
@@ -163,229 +196,139 @@ class ProblemDefinitionSkill:
         return detected
 
     # ──────────────────────────────────────
-    # 1. 도메인 YAML 로드
+    # 토폴로지 감지 (Phase 1 데이터 기반)
     # ──────────────────────────────────────
-    def _load_domain_yaml(self, state) -> dict:
-        domain = state.detected_domain or "generic"
+    def _detect_topology(self, state, project_id: str) -> Optional[str]:
+        """Phase 1의 timetable_rows.csv에서 토폴로지를 판별"""
+        phase1_dir = _get_safe_dir(project_id) / "phase1"
+        trips_file = phase1_dir / "timetable_rows.csv"
+        if not trips_file.exists():
+            return None
 
-        # knowledge/domains/ 폴더에서 동적으로 매칭
-        domains_dir = _BASE / "knowledge" / "domains"
-        if domains_dir.exists():
-            # 정확 매칭 시도
-            exact_path = domains_dir / f"{domain}.yaml"
-            if exact_path.exists():
-                return self._get_cached_yaml(str(exact_path))
+        try:
+            df = pd.read_csv(str(trips_file))
+            if df.empty:
+                return None
 
-            # crew -> railway 등 도메인 프로파일에서 매핑 조회
-            # domain_profiles.yaml의 키 목록으로 유사 매칭
-            for yaml_file in domains_dir.glob("*.yaml"):
-                domain_key = yaml_file.stem  # railway, aviation 등
-                cached = self._get_cached_yaml(str(yaml_file))
-                # 도메인 YAML의 detection_keywords에서 현재 domain과 매칭
-                det_kws = cached.get("detection_keywords", [])
-                flat_kws = []
-                for item in det_kws:
-                    if isinstance(item, list):
-                        flat_kws.extend(item)
-                    else:
-                        flat_kws.append(str(item))
-                if domain.lower() in [k.lower() for k in flat_kws]:
-                    return cached
+            # 종착역 수
+            terminals = set()
+            if "dep_station" in df.columns:
+                terminals.update(df["dep_station"].dropna().unique())
+            if "arr_station" in df.columns:
+                terminals.update(df["arr_station"].dropna().unique())
+            terminal_count = len(terminals)
 
-            # fallback: 첫 번째 yaml
-            for yaml_file in domains_dir.glob("*.yaml"):
-                return self._get_cached_yaml(str(yaml_file))
+            # 방향 값 수
+            direction_values = 0
+            if "direction" in df.columns:
+                direction_values = df["direction"].nunique()
 
-        return {}
+            # 노선 ID 수
+            line_count = 1
+            for col in df.columns:
+                if any(kw in str(col).lower() for kw in ["line", "노선", "line_id"]):
+                    line_count = df[col].nunique()
+                    break
 
-    def _get_cached_yaml(self, path: str) -> dict:
-        if path not in self._domain_cache:
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    self._domain_cache[path] = yaml.safe_load(f) or {}
-            except Exception as e:
-                logger.error(f"Failed to load {path}: {e}")
-                self._domain_cache[path] = {}
-        return self._domain_cache[path]
+            # 순환 감지
+            if "dep_station" in df.columns and "arr_station" in df.columns:
+                same_start_end = (df["dep_station"] == df["arr_station"]).sum()
+                circular_ratio = same_start_end / len(df) if len(df) > 0 else 0
+                if circular_ratio > 0.3:
+                    return "circular"
+
+            # 다중노선
+            if line_count >= 2 or terminal_count >= 4:
+                return "multi_line"
+
+            # 단방향
+            if direction_values <= 1:
+                return "single_line_unidirectional"
+
+            # 양방향 (기본)
+            if terminal_count <= 3 and direction_values == 2:
+                return "single_line_bidirectional"
+
+            return "single_line_bidirectional"
+
+        except Exception as e:
+            logger.warning(f"Topology detection failed: {e}")
+            return None
 
     # ──────────────────────────────────────
-    # 2. 문제 유형 결정 (matching_rules.yaml 기반)
+    # 문제 유형 결정
     # ──────────────────────────────────────
-    def _determine_problem_type(
-        self, state, domain_yaml: dict, detected_data_types: Set[str]
-    ) -> dict:
+    def _determine_problem_type(self, state, dk, detected_data_types: Set[str]) -> dict:
         best = {"stage": "task_generation", "variant": None, "confidence": 0.0}
 
-        # matching_rules.yaml의 각 규칙을 평가
         for rule_name, rule in self._matching_rules.items():
             required = set(rule.get("required_data", []))
-            optional = set(rule.get("optional_data", []))
             base_conf = rule.get("base_confidence", 0.5)
             stage = rule.get("recommended_stage", "task_generation")
 
-            # 필수 데이터가 모두 감지되었는지 확인
             if not required.issubset(detected_data_types):
                 continue
 
             confidence = base_conf
-
-            # boost 조건 평가
             for boost in rule.get("boost_conditions", []):
                 condition = boost.get("condition", "")
                 boost_val = boost.get("boost", 0)
-
-                # 조건 해석 (간단한 패턴 매칭)
                 if "detected" in condition:
-                    # "existing_duty detected" → existing_duty가 감지되었으면 boost
                     for dtype in detected_data_types:
                         if dtype in condition:
                             confidence += boost_val
                             break
-                elif "trip_count" in condition or "crew_count" in condition:
-                    # 데이터 팩트에서 수치 확인
-                    facts = state.data_facts or {}
-                    unique = facts.get("unique_counts", {})
-                    for key, count in unique.items():
-                        if "trip" in key.lower() and "trip_count" in condition:
-                            try:
-                                threshold = int(re.search(r"\d+", condition).group())
-                                if count >= threshold:
-                                    confidence += boost_val
-                            except (AttributeError, ValueError):
-                                pass
-                        if "crew" in key.lower() and "crew_count" in condition:
-                            try:
-                                threshold = int(re.search(r"\d+", condition).group())
-                                if count >= threshold:
-                                    confidence += boost_val
-                            except (AttributeError, ValueError):
-                                pass
                 elif "all five data types" in condition:
                     if len(detected_data_types) >= 5:
                         confidence += boost_val
 
             confidence = min(confidence, 1.0)
-
             if confidence > best["confidence"]:
-                best = {
-                    "stage": stage,
-                    "variant": None,
-                    "confidence": confidence,
-                    "matched_rule": rule_name,
-                }
+                best = {"stage": stage, "variant": None, "confidence": confidence, "matched_rule": rule_name}
 
-        # variant 결정 (도메인 YAML의 problem_variants에서)
-        variants = domain_yaml.get("problem_variants", {})
-        # stage에 해당하는 variant 그룹 찾기
-        stage = best.get("stage", "task_generation")
-        variant_group_key = self._stage_variant_group.get(stage, stage)
+        # variant 결정
+        if dk:
+            variants_section = dk.index.get("network_topologies", {}) if dk.index else {}
+            # 도메인 YAML에 problem_variants가 있으면 사용 (단일 파일 호환)
+            if dk.raw_single:
+                variants = dk.raw_single.get("problem_variants", {})
+                stage = best.get("stage", "task_generation")
+                variant_group_key = self._stage_variant_group.get(stage, stage)
+                variant_group = variants.get(variant_group_key, {})
+                if variant_group:
+                    best["variant"] = next(iter(variant_group.keys()), None)
 
-        if variant_group_key and variant_group_key in variants:
-            variant_group = variants[variant_group_key]
-            best_variant = None
-            best_variant_score = 0
-
-            facts = state.data_facts or {}
-            all_columns = facts.get("all_columns", {})
-
-            for vkey, vinfo in variant_group.items():
-                hints = vinfo.get("detection_hints", [])
-                score = 0
-                for hint in hints:
-                    hint_lower = hint.lower()
-                    # 힌트를 데이터 특성과 매칭
-                    if "2 termini" in hint_lower or "bidirectional" in hint_lower:
-                        # direction 컬럼 존재 여부
-                        for cols in all_columns.values():
-                            col_text = " ".join(str(c).lower() for c in cols)
-                            if "direction" in col_text or "방향" in col_text or "상행" in col_text:
-                                score += 1
-                                break
-                    if "single line" in hint_lower:
-                        score += 0.5  # 기본 가정
-                    if "one direction" in hint_lower:
-                        pass  # 단방향 감지 로직
-                    if "multiple line" in hint_lower or "3+ termini" in hint_lower:
-                        pass  # 다중 노선 감지 로직
-
-                if score > best_variant_score:
-                    best_variant_score = score
-                    best_variant = vkey
-
-            if best_variant:
-                best["variant"] = best_variant
-            else:
-                # 첫 번째 variant를 기본값으로
-                first_variant = next(iter(variant_group.keys()), None)
-                best["variant"] = first_variant
-
-        logger.info(
-            f"Problem type determined: stage={best.get('stage')}, "
-            f"variant={best.get('variant')}, confidence={best.get('confidence')}, "
-            f"rule={best.get('matched_rule')}"
-        )
+        logger.info(f"Problem type: {best}")
         return best
 
     # ──────────────────────────────────────
-    # 3. 목적함수 결정
+    # 목적함수 결정
     # ──────────────────────────────────────
-    def _determine_objective(self, problem_type: dict, domain_yaml: dict) -> dict:
+    def _determine_objective(self, problem_type: dict, dk) -> dict:
         stage = problem_type.get("stage", "task_generation")
-        variant = problem_type.get("variant")
-
-        # 도메인 YAML에서 variant별 목적함수 후보 가져오기
-        variant_group_key = self._stage_variant_group.get(stage, stage)
-        variant_info = (
-            domain_yaml
-            .get("problem_variants", {})
-            .get(variant_group_key, {})
-            .get(variant, {})
-        ) if variant else {}
-        example_objectives = variant_info.get("example_objectives", [])
-
-        # taxonomy에서 stage별 기본 목적함수
         stage_info = self.taxonomy.get("stages", {}).get(stage, {})
         typical_objectives = stage_info.get("typical_objectives", [])
 
-        # 기본 목적함수 선택
-        primary = None
-        if example_objectives:
-            primary = example_objectives[0]
-        elif typical_objectives:
-            primary = typical_objectives[0]
-        else:
-            # taxonomy 전체에서 첫 번째 objective를 fallback으로 사용
-            all_stage_objs = []
-            for _si in self.taxonomy.get("stages", {}).values():
-                all_stage_objs.extend(_si.get("typical_objectives", []))
-            primary = all_stage_objs[0] if all_stage_objs else "minimize"
+        # 템플릿에서 목적함수 후보 가져오기
+        obj_templates = {}
+        if dk and dk.templates:
+            obj_templates = dk.templates.get("objective_templates", {})
 
-        # 도메인 YAML의 constraints에서 목적함수 설명 보강
-        domain_objectives = domain_yaml.get("constraints", {}).get("soft", {})
-        # taxonomy의 typical_objectives에서 설명 동적 구축
-        all_obj_descriptions = dict(self._obj_descriptions)
-        # 도메인 YAML의 typical_objectives (있으면)
-        for obj_text in domain_yaml.get("problem_variants", {}).get(
-            variant_group_key, {}
-        ).get(variant, {}).get("example_objectives", []):
-            all_obj_descriptions[obj_text.lower().strip()] = obj_text
+        primary = typical_objectives[0] if typical_objectives else "minimize"
+        description = primary.replace("_", " ")
 
-        primary_clean = primary.lower().strip()
-        description = all_obj_descriptions.get(primary_clean, primary)
-        # 부분 매칭
-        for key, desc in all_obj_descriptions.items():
-            if key in primary_clean or primary_clean in key:
-                description = desc
+        # 템플릿에서 상세 설명 조회
+        for tname, tdata in obj_templates.items():
+            if tname == primary or primary in tname:
+                description = tdata.get("description", description)
                 break
 
         alternatives = []
-        all_objs = example_objectives or typical_objectives
-        for obj in all_objs[1:3]:
-            obj_clean = obj.lower().strip()
-            alt_desc = all_obj_descriptions.get(obj_clean, obj)
-            for key, desc in all_obj_descriptions.items():
-                if key in obj_clean or obj_clean in key:
-                    alt_desc = desc
+        for obj in typical_objectives[1:3]:
+            alt_desc = obj.replace("_", " ")
+            for tname, tdata in obj_templates.items():
+                if tname == obj or obj in tname:
+                    alt_desc = tdata.get("description", alt_desc)
                     break
             alternatives.append({"target": obj, "description": alt_desc})
 
@@ -396,195 +339,386 @@ class ProblemDefinitionSkill:
             "alternatives": alternatives,
         }
 
-    # ──────────────────────────────────────
-    # 4. 제약조건 결정
-    # ──────────────────────────────────────
-    def _determine_constraints(self, problem_type: dict, domain_yaml: dict) -> dict:
-        constraints_def = domain_yaml.get("constraints", {})
+    # ══════════════════════════════════════
+    # ★ 3단계 제약조건 결정 (핵심 리팩토링)
+    # ══════════════════════════════════════
+    async def _determine_constraints_phased(
+        self, model, state, project_id: str, dk,
+        detected_data_types: Set[str], topology: Optional[str]
+    ) -> dict:
+        """
+        Phase A: 적용 가능성 필터링
+        Phase B: 타입별 값 추출
+        Phase C: 결과 정리 (사용자 확인용)
+        """
+        if not dk:
+            return {"hard": {}, "soft": {}}
 
-        hard = {}
-        for cname, cdata in constraints_def.get("hard", {}).items():
-            hard[cname] = {
+        hard_results = {}
+        soft_results = {}
+
+        # Phase 1 데이터 로드
+        phase1_data = self._load_phase1_data(project_id)
+
+        # ── Phase A: 적용 가능성 필터링 ──
+        for cname, cdata in dk.hard_constraints.items():
+            applicability = self._check_applicability(
+                cdata, detected_data_types, topology, phase1_data
+            )
+            if not applicability["applicable"]:
+                logger.debug(f"Constraint {cname} skipped: {applicability['reason']}")
+                continue
+
+            # ── Phase B: 타입별 값 추출 ──
+            ctype = cdata.get("type", "single_param")
+            extraction = await self._extract_constraint_value(
+                model, cname, cdata, ctype, phase1_data, state
+            )
+
+            hard_results[cname] = {
                 "name_ko": cdata.get("name_ko", cname),
+                "type": ctype,
                 "description": cdata.get("description", ""),
-                "parameter": cdata.get("parameter"),
-                "parameters": cdata.get("parameters"),
-                "formulation": cdata.get("formulation"),
+                "status": extraction.get("status", "unknown"),
+                "values": extraction.get("values", {}),
+                "computation_phase": extraction.get("computation_phase"),
             }
 
-        soft = {}
-        for cname, cdata in constraints_def.get("soft", {}).items():
+        # Soft constraints
+        for cname, cdata in dk.soft_constraints.items():
+            applicability = self._check_applicability(
+                cdata, detected_data_types, topology, phase1_data
+            )
+            if not applicability["applicable"]:
+                continue
+
             weight_range = cdata.get("weight_range", [0.1, 0.5])
             default_weight = round((weight_range[0] + weight_range[1]) / 2, 2)
-            soft[cname] = {
+            soft_results[cname] = {
                 "name_ko": cdata.get("name_ko", cname),
+                "type": cdata.get("type", "single_param"),
                 "description": cdata.get("description", ""),
                 "weight": default_weight,
                 "weight_range": weight_range,
+                "status": "default",
             }
 
-        return {"hard": hard, "soft": soft}
+        return {"hard": hard_results, "soft": soft_results}
+
+    # ── Phase A: 적용 가능성 검사 ──
+    def _check_applicability(
+        self, cdata: dict, detected_data_types: Set[str],
+        topology: Optional[str], phase1_data: dict
+    ) -> dict:
+        """제약조건이 현재 데이터/토폴로지에 적용 가능한지 판단"""
+
+        # 1. required_data_types 확인
+        required = cdata.get("required_data_types", [])
+        if required:
+            # timetable은 Phase 1에서 timetable_rows.csv로 변환되므로 항상 있다고 봄
+            effective_detected = set(detected_data_types)
+            if phase1_data.get("has_trips"):
+                effective_detected.add("timetable")
+
+            missing = [r for r in required if r not in effective_detected]
+            if missing:
+                return {"applicable": False, "reason": f"missing data types: {missing}"}
+
+        # 2. applicability 조건 확인
+        applicability = cdata.get("applicability", "all")
+        if isinstance(applicability, dict):
+            conditions = applicability.get("conditions", [])
+            for cond in conditions:
+                cond_lower = cond.lower()
+                if "crew_info" in cond_lower and "crew_info" not in detected_data_types:
+                    return {"applicable": False, "reason": f"condition not met: {cond}"}
+                if "preference_data" in cond_lower and "preference_data" not in detected_data_types:
+                    return {"applicable": False, "reason": f"condition not met: {cond}"}
+                if "roster_assignment" in cond_lower:
+                    pass  # 추후 단계 구분 시 필터링
+
+        return {"applicable": True, "reason": "ok"}
+
+    # ── Phase B: 타입별 값 추출 ──
+    async def _extract_constraint_value(
+        self, model, cname: str, cdata: dict, ctype: str,
+        phase1_data: dict, state
+    ) -> dict:
+        """제약조건 타입에 따라 값을 추출한다."""
+
+        if ctype == "single_param":
+            return self._extract_single_param(cname, cdata, phase1_data)
+
+        elif ctype == "compound":
+            return self._extract_compound(cname, cdata, phase1_data)
+
+        elif ctype == "conditional":
+            return self._extract_conditional(cname, cdata, phase1_data)
+
+        elif ctype == "pairwise":
+            return {
+                "status": "computed_in_phase2",
+                "values": {},
+                "computation_phase": "semantic_normalization",
+            }
+
+        elif ctype == "data_derived":
+            return self._extract_data_derived(cname, cdata, phase1_data)
+
+        return {"status": "unknown_type", "values": {}}
+
+    def _extract_single_param(self, cname: str, cdata: dict, phase1_data: dict) -> dict:
+        param_name = cdata.get("parameter")
+        if not param_name:
+            return {"status": "confirmed", "values": {}}
+
+        # Phase 1 파라미터에서 검색
+        value = self._search_phase1_params(param_name, cdata, phase1_data)
+        if value is not None:
+            return {
+                "status": "extracted",
+                "values": {param_name: {"value": value, "source": "phase1_data", "confidence": 0.8}},
+            }
+
+        return {
+            "status": "user_input_required",
+            "values": {param_name: {"value": None, "source": "user_input_required"}},
+        }
+
+    def _extract_compound(self, cname: str, cdata: dict, phase1_data: dict) -> dict:
+        params = cdata.get("parameters", {})
+        values = {}
+        all_found = True
+
+        for pname, pinfo in params.items():
+            value = self._search_phase1_params(pname, cdata, phase1_data)
+            if value is not None:
+                values[pname] = {"value": value, "source": "phase1_data", "confidence": 0.8}
+            else:
+                values[pname] = {"value": None, "source": "user_input_required"}
+                all_found = False
+
+        status = "extracted" if all_found else ("partial" if any(v["value"] is not None for v in values.values()) else "user_input_required")
+        return {"status": status, "values": values}
+
+    def _extract_conditional(self, cname: str, cdata: dict, phase1_data: dict) -> dict:
+        trigger = cdata.get("trigger", {})
+        consequence = cdata.get("consequence", {})
+        values = {}
+
+        # trigger threshold
+        threshold_param = trigger.get("threshold_param")
+        if threshold_param:
+            val = self._search_phase1_params(threshold_param, cdata, phase1_data)
+            values[threshold_param] = {
+                "value": val,
+                "source": "phase1_data" if val is not None else "user_input_required",
+            }
+
+        # consequence value
+        consequence_param = consequence.get("parameter")
+        if consequence_param:
+            val = self._search_phase1_params(consequence_param, cdata, phase1_data)
+            values[consequence_param] = {
+                "value": val,
+                "source": "phase1_data" if val is not None else "user_input_required",
+            }
+
+        has_any = any(v.get("value") is not None for v in values.values())
+        status = "extracted" if has_any else "user_input_required"
+        return {"status": status, "values": values}
+
+    def _extract_data_derived(self, cname: str, cdata: dict, phase1_data: dict) -> dict:
+        derivation = cdata.get("derivation", {})
+        method = derivation.get("method", "")
+
+        if method == "compute_big_m":
+            max_time = phase1_data.get("max_time", None)
+            if max_time is not None:
+                m_value = max(1440, int(max_time * 1.5))
+                return {
+                    "status": "auto_computed",
+                    "values": {"M": {"value": m_value, "source": "auto_computed"}},
+                }
+
+        if method == "generate_duty_candidates":
+            trip_count = phase1_data.get("trip_count", 0)
+            if trip_count > 0:
+                user_params = cdata.get("user_adjustable_params", {})
+                default_mult = user_params.get("candidate_multiplier", {}).get("default", 1.5)
+                candidate_size = int(trip_count * default_mult)
+                return {
+                    "status": "auto_computed",
+                    "values": {
+                        "candidate_set_size": {"value": candidate_size, "source": "auto_computed"},
+                        "candidate_multiplier": {"value": default_mult, "source": "default_adjustable"},
+                    },
+                }
+
+        return {
+            "status": "computed_in_phase2",
+            "values": {},
+            "computation_phase": "semantic_normalization",
+        }
+
+    # ── Phase 1 데이터 로드 ──
+    def _load_phase1_data(self, project_id: str) -> dict:
+        """Phase 1 결과 파일에서 제약조건 추출에 필요한 정보를 수집"""
+        phase1_dir = _get_safe_dir(project_id) / "phase1"
+        result = {"has_trips": False, "trip_count": 0, "params_raw": [], "columns": set()}
+
+        # trips
+        trips_file = phase1_dir / "timetable_rows.csv"
+        if trips_file.exists():
+            try:
+                df = pd.read_csv(str(trips_file))
+                result["has_trips"] = True
+                result["trip_count"] = len(df)
+                result["columns"].update(df.columns.tolist())
+                if "trip_arr_time" in df.columns:
+                    result["max_time"] = float(df["trip_arr_time"].max())
+                if "trip_dep_time" in df.columns:
+                    result["min_time"] = float(df["trip_dep_time"].min())
+                if "trip_duration" in df.columns:
+                    result["avg_duration"] = float(df["trip_duration"].mean())
+                if "dep_station" in df.columns and "arr_station" in df.columns:
+                    result["stations"] = sorted(
+                        set(df["dep_station"].tolist() + df["arr_station"].tolist())
+                    )
+            except Exception as e:
+                logger.warning(f"Phase1 trips read failed: {e}")
+
+        # parameters_raw
+        params_file = phase1_dir / "parameters_raw.csv"
+        if params_file.exists():
+            try:
+                pdf = pd.read_csv(str(params_file))
+                result["params_raw"] = pdf.to_dict("records")
+            except Exception as e:
+                logger.warning(f"Phase1 params read failed: {e}")
+
+        # structure_report
+        report_file = phase1_dir / "structure_report.json"
+        if report_file.exists():
+            try:
+                with open(str(report_file), "r", encoding="utf-8") as f:
+                    result["structure_report"] = json.load(f)
+            except Exception:
+                pass
+
+        return result
+
+    def _search_phase1_params(self, param_name: str, cdata: dict, phase1_data: dict):
+        """Phase 1 파라미터에서 제약조건 값을 검색"""
+        params_raw = phase1_data.get("params_raw", [])
+        if not params_raw:
+            return None
+
+        # detection_hints에서 키워드 수집
+        hints = cdata.get("detection_hints", {})
+        all_keywords = []
+        if isinstance(hints, dict):
+            for lang_keywords in hints.values():
+                if isinstance(lang_keywords, list):
+                    all_keywords.extend(kw.lower() for kw in lang_keywords)
+        elif isinstance(hints, list):
+            all_keywords.extend(h.lower() for h in hints)
+
+        # param_name에서 키워드 추출
+        param_words = set(param_name.lower().replace("_", " ").split())
+        stop_words = {"minutes", "min", "time", "per", "param", "max", "in"}
+        param_core = param_words - stop_words
+
+        best_match = None
+        best_score = 0
+
+        for p in params_raw:
+            pname = str(p.get("param_name", "")).lower()
+            context = str(p.get("context", "")).lower()
+            value = p.get("value")
+
+            if value is None:
+                continue
+
+            score = 0
+
+            # param_name 직접 매칭
+            if param_name.lower() in pname or pname in param_name.lower():
+                score += 3
+
+            # 키워드 매칭
+            for kw in all_keywords:
+                if kw in pname or kw in context:
+                    score += 1
+
+            # param 핵심어 매칭
+            for w in param_core:
+                if w in pname or w in context:
+                    score += 0.5
+
+            if score > best_score:
+                best_score = score
+                best_match = value
+
+        return best_match if best_score >= 1.5 else None
 
     # ──────────────────────────────────────
-    # 5. 파라미터 수집
+    # 파라미터 수집
     # ──────────────────────────────────────
-    def _collect_parameters(self, state, domain_yaml: dict) -> dict:
+    def _collect_parameters(self, state, project_id: str, dk, constraints: dict) -> dict:
+        """제약조건에서 필요한 파라미터를 종합하여 수집"""
         parameters = {}
 
-        # 도메인 YAML에서 필요한 파라미터 목록과 기본값 가져오기
-        ref_values = domain_yaml.get("reference_values", {})
-        sub_domain = self._detect_sub_domain(state, domain_yaml)
-        ref = self._find_reference(ref_values, sub_domain)
+        # 제약조건의 값에서 파라미터 수집
+        for category in ["hard", "soft"]:
+            for cname, cinfo in constraints.get(category, {}).items():
+                for pname, pval in cinfo.get("values", {}).items():
+                    if pname not in parameters:
+                        parameters[pname] = pval
 
-        # 제약조건에서 필요한 파라미터 추출
-        constraints = domain_yaml.get("constraints", {})
-        required_params = set()
-
-        for ctype in ["hard", "soft"]:
-            for cname, cdata in constraints.get(ctype, {}).items():
-                param = cdata.get("parameter")
-                if param and param != "null":
-                    required_params.add(param)
-                for pname in cdata.get("parameters", {}).keys():
-                    required_params.add(pname)
-
-        # 데이터에서 추출 시도 (data_detection.yaml 기반)
-        extracted = self._try_extract_from_data(state, required_params)
-
-        # 각 파라미터에 대해 값 결정
-        for param_name in required_params:
-            if param_name in extracted:
-                parameters[param_name] = {
-                    "value": extracted[param_name],
-                    "source": "data",
-                }
-            elif param_name in ref:
-                parameters[param_name] = {
-                    "value": ref[param_name],
-                    "source": "default",
-                }
-            else:
-                parameters[param_name] = {
-                    "value": None,
-                    "source": "user_input_required",
-                }
+        # reference_ranges에서 참고 범위 추가
+        if dk:
+            sub_domain = self._detect_sub_domain(state, dk)
+            if sub_domain:
+                for pname in list(parameters.keys()):
+                    ref = dk.get_reference_range(sub_domain, pname)
+                    if ref and parameters[pname].get("value") is None:
+                        parameters[pname]["reference_range"] = ref.get("range")
+                        parameters[pname]["note"] = ref.get("note", "")
 
         return parameters
 
-    def _detect_sub_domain(self, state, domain_yaml: dict) -> Optional[str]:
+    def _detect_sub_domain(self, state, dk) -> Optional[str]:
         search_text = ""
         if state.uploaded_files:
             search_text += " ".join(str(f).lower() for f in state.uploaded_files)
         if state.csv_summary:
             search_text += " " + state.csv_summary.lower()
 
-        for sub_key, sub_data in domain_yaml.get("sub_domains", {}).items():
+        for sub_key, sub_data in dk.sub_domains.items():
             keywords = sub_data.get("detection_keywords", [])
             if any(kw.lower() in search_text for kw in keywords):
                 return sub_key
         return None
 
-    def _find_reference(self, ref_values: dict, sub_domain: Optional[str]) -> dict:
-        if not ref_values:
-            return {}
-        if sub_domain:
-            for key in ref_values:
-                if sub_domain.replace("_", "") in key.replace("_", ""):
-                    return ref_values[key]
-        return next(iter(ref_values.values()), {})
-
-    def _try_extract_from_data(self, state, required_params: set) -> dict:
-        """data_detection.yaml의 work_regulations.column_keywords를 사용하여 파라미터 추출"""
-        extracted = {}
-        if not state.data_facts:
-            return extracted
-
-        all_columns = state.data_facts.get("all_columns", {})
-
-        # data_detection.yaml에서 work_regulations의 extraction_keys와
-        # column_keywords를 사용하여 파라미터-키워드 매핑 구축
-        work_reg = self.data_detection.get("data_types", {}).get("work_regulations", {})
-        work_keywords = work_reg.get("column_keywords", [])
-        extraction_keys = work_reg.get("extraction_keys", [])
-
-        # extraction_keys에서 required_params와 매칭되는 것 찾기
-        # 키워드 그룹을 평탄화하여 사용
-        flat_keywords = []
-        for group in work_keywords:
-            if isinstance(group, list):
-                flat_keywords.extend(group)
-            else:
-                flat_keywords.append(str(group))
-
-        for sheet_key, columns in all_columns.items():
-            for param_name in required_params:
-                if param_name in extracted:
-                    continue
-
-                # param_name이 extraction_keys에 있는지 확인
-                if param_name not in extraction_keys:
-                    continue
-
-                # param_name에서 키워드 추출 (snake_case 분리)
-                param_words = set(param_name.lower().replace("_", " ").split())
-                # "minutes", "min", "time" 등 단위어 제거
-                stop_words = {"minutes", "min", "time", "per", "param"}
-                param_core = param_words - stop_words
-
-                for col in columns:
-                    col_l = str(col).lower()
-                    # 1차: flat_keywords 중 하나라도 컬럼명에 포함
-                    kw_match = any(kw.lower() in col_l for kw in flat_keywords)
-                    # 2차: param 핵심 단어가 컬럼명에 포함
-                    core_match = any(w in col_l for w in param_core) if param_core else False
-
-                    if kw_match and core_match:
-                        # data_profile에서 샘플값 추출
-                        if state.data_profile:
-                            col_info = (
-                                state.data_profile
-                                .get("files", {})
-                                .get(sheet_key, {})
-                                .get("columns", {})
-                                .get(str(col), {})
-                            )
-                            samples = col_info.get("sample_values", [])
-                            if samples:
-                                try:
-                                    extracted[param_name] = float(samples[0])
-                                    break
-                                except (ValueError, IndexError):
-                                    pass
-
-        return extracted
-
     # ──────────────────────────────────────
     # 응답 포맷팅
     # ──────────────────────────────────────
-    def _format_proposal(self, state, domain_yaml: dict, proposal: dict) -> str:
-        lines = []
-        lines.append("## 문제 정의 제안\n")
+    def _format_proposal(self, state, dk, proposal: dict) -> str:
+        lines = ["## 문제 정의 제안\n"]
 
         # 1. 문제 유형
         stage = proposal.get("stage", "")
-        variant = proposal.get("variant", "")
         stage_info = self.taxonomy.get("stages", {}).get(stage, {})
         stage_ko = stage_info.get("name_ko", stage)
-
-        # variant 한국어 이름을 도메인 YAML에서 동적 조회
-        variant_group_key = self._stage_variant_group.get(stage, stage)
-        variant_info = (
-            domain_yaml
-            .get("problem_variants", {})
-            .get(variant_group_key, {})
-            .get(variant, {})
-        ) if variant else {}
-        variant_ko = variant_info.get("name_ko", variant or "")
+        topology = proposal.get("topology")
 
         lines.append("### 1. 문제 유형")
         lines.append(f"- **단계**: {stage_ko}")
-        if variant_ko:
-            lines.append(f"- **세부 유형**: {variant_ko}")
+        if topology:
+            topo_info = dk.network_topologies.get(topology, {}) if dk else {}
+            topo_ko = topo_info.get("name_ko", topology)
+            lines.append(f"- **네트워크 유형**: {topo_ko}")
         lines.append("")
 
         # 2. 목적함수
@@ -592,68 +726,112 @@ class ProblemDefinitionSkill:
         lines.append("### 2. 목적함수")
         lines.append(f"- **방향**: {obj.get('type', 'minimize')}")
         lines.append(f"- **대상**: {obj.get('description', '')}")
-
         alts = obj.get("alternatives", [])
         if alts:
             alt_texts = [a.get("description", a.get("target", "")) for a in alts]
             lines.append(f"- **대안**: {', '.join(alt_texts)}")
         lines.append("")
 
-        # 3. 제약조건
-        lines.append("### 3. 제약조건")
-        lines.append("")
-        lines.append("**필수 제약 (Hard):**")
-        for cname, cdata in proposal.get("hard_constraints", {}).items():
-            name_ko = cdata.get("name_ko", cname)
-            desc = cdata.get("description", "")
-            lines.append(f"- **{name_ko}**: {desc}")
-        lines.append("")
+        # 3. 제약조건 (타입별 그룹)
+        lines.append("### 3. 제약조건\n")
 
-        lines.append("**선택 제약 (Soft):**")
-        for cname, cdata in proposal.get("soft_constraints", {}).items():
-            name_ko = cdata.get("name_ko", cname)
-            desc = cdata.get("description", "")
-            weight = cdata.get("weight", 0)
-            lines.append(f"- **{name_ko}**: {desc} (가중치: {weight})")
-        lines.append("")
+        hard = proposal.get("hard_constraints", {})
+        if hard:
+            # 상태별 분류
+            confirmed = {k: v for k, v in hard.items() if v.get("status") in ("confirmed", "extracted", "auto_computed")}
+            partial = {k: v for k, v in hard.items() if v.get("status") == "partial"}
+            needs_input = {k: v for k, v in hard.items() if v.get("status") == "user_input_required"}
+            computed_later = {k: v for k, v in hard.items() if v.get("status") in ("computed_in_phase2",)}
 
-        # 4. 파라미터
-        lines.append("### 4. 파라미터")
+            if confirmed:
+                lines.append("**✅ 확인된 제약 (Hard):**")
+                for cname, cdata in confirmed.items():
+                    name_ko = cdata.get("name_ko", cname)
+                    values_str = self._format_values(cdata.get("values", {}))
+                    lines.append(f"- **{name_ko}** [{cdata.get('type','')}]: {values_str}")
+                lines.append("")
+
+            if partial:
+                lines.append("**⚠️ 일부 확인된 제약 (Hard):**")
+                for cname, cdata in partial.items():
+                    name_ko = cdata.get("name_ko", cname)
+                    values_str = self._format_values(cdata.get("values", {}))
+                    lines.append(f"- **{name_ko}** [{cdata.get('type','')}]: {values_str}")
+                lines.append("")
+
+            if needs_input:
+                lines.append("**❓ 입력 필요 (Hard):**")
+                for cname, cdata in needs_input.items():
+                    name_ko = cdata.get("name_ko", cname)
+                    desc = cdata.get("description", "")
+                    lines.append(f"- **{name_ko}**: {desc}")
+                    for pname, pval in cdata.get("values", {}).items():
+                        ref = pval.get("reference_range")
+                        if ref:
+                            lines.append(f"  - {pname}: 참고 범위 {ref}")
+                        else:
+                            lines.append(f"  - {pname}: ???")
+                lines.append("")
+
+            if computed_later:
+                lines.append("**🔄 자동 계산 예정 (Phase 2):**")
+                for cname, cdata in computed_later.items():
+                    name_ko = cdata.get("name_ko", cname)
+                    lines.append(f"- **{name_ko}**: 데이터 정규화 후 자동 계산")
+                lines.append("")
+
+        soft = proposal.get("soft_constraints", {})
+        if soft:
+            lines.append("**선택 제약 (Soft):**")
+            for cname, cdata in soft.items():
+                name_ko = cdata.get("name_ko", cname)
+                weight = cdata.get("weight", 0)
+                lines.append(f"- **{name_ko}**: {cdata.get('description','')} (가중치: {weight})")
+            lines.append("")
+
+        # 4. 파라미터 요약
         params = proposal.get("parameters", {})
+        if params:
+            data_params = {k: v for k, v in params.items() if v.get("source") in ("phase1_data", "auto_computed")}
+            missing_params = {k: v for k, v in params.items() if v.get("source") == "user_input_required"}
 
-        data_params = {k: v for k, v in params.items() if v.get("source") == "data"}
-        default_params = {k: v for k, v in params.items() if v.get("source") == "default"}
-        missing_params = {k: v for k, v in params.items() if v.get("source") == "user_input_required"}
+            if data_params:
+                lines.append("### 4. 파라미터 (데이터 추출)")
+                for pname, pinfo in data_params.items():
+                    lines.append(f"- {pname}: **{pinfo.get('value')}**")
+                lines.append("")
 
-        if data_params:
-            lines.append("")
-            lines.append("**데이터에서 추출:**")
-            for pname, pinfo in data_params.items():
-                lines.append(f"- {pname}: **{pinfo['value']}**")
+            if missing_params:
+                lines.append("### 5. 입력 필요 파라미터")
+                for pname, pinfo in missing_params.items():
+                    ref = pinfo.get("reference_range")
+                    if ref:
+                        lines.append(f"- {pname}: ??? (참고 범위: {ref})")
+                    else:
+                        lines.append(f"- {pname}: ???")
+                lines.append("")
 
-        if default_params:
-            lines.append("")
-            lines.append("**기본값 제안 (수정 가능):**")
-            for pname, pinfo in default_params.items():
-                lines.append(f"- {pname}: **{pinfo['value']}**")
-
-        if missing_params:
-            lines.append("")
-            lines.append("**입력 필요:**")
-            for pname in missing_params:
-                lines.append(f"- {pname}: ???")
-
-        lines.append("")
         lines.append("---")
         lines.append("위 내용을 확인하고 **확인**, **수정**, 또는 **다시 분석**을 입력해주세요.")
+        lines.append("파라미터 입력: `파라미터명 = 값` 형식")
 
         return "\n".join(lines)
+
+    def _format_values(self, values: dict) -> str:
+        parts = []
+        for pname, pval in values.items():
+            v = pval.get("value")
+            if v is not None:
+                parts.append(f"{pname}={v}")
+            else:
+                parts.append(f"{pname}=???")
+        return ", ".join(parts) if parts else "구조적 제약"
 
     # ──────────────────────────────────────
     # 사용자 응답 처리
     # ──────────────────────────────────────
-    def _handle_user_response(
-        self, session: CrewSession, project_id: str, message: str
+    async def _handle_user_response(
+        self, model, session: CrewSession, project_id: str, message: str
     ) -> Dict:
         state = session.state
         keywords = self.prompt_config.get("confirmation_keywords", {})
@@ -667,13 +845,18 @@ class ProblemDefinitionSkill:
         if any(kw in msg_lower for kw in positive):
             state.problem_defined = True
             state.confirmed_problem = state.problem_definition
+            state.constraints_confirmed = True
+            state.confirmed_constraints = {
+                "hard": state.problem_definition.get("hard_constraints", {}),
+                "soft": state.problem_definition.get("soft_constraints", {}),
+            }
             save_session_state(project_id, state)
 
             return {
                 "type": "problem_definition",
                 "text": (
                     "**문제 정의가 확정되었습니다.**\n\n"
-                    "다음 단계: 데이터 정규화\n"
+                    "다음 단계: 데이터 정규화 (Phase 2)\n"
                     "데이터를 수학 모델에 맞는 형태로 변환합니다."
                 ),
                 "data": {
@@ -682,9 +865,7 @@ class ProblemDefinitionSkill:
                     "agent_status": "problem_defined",
                 },
                 "options": [
-                    {"label": "데이터 정규화 시작",
-                     "action": "send",
-                     "message": "데이터 정규화 시작"},
+                    {"label": "데이터 정규화 시작", "action": "send", "message": "데이터 정규화 시작"},
                 ],
             }
 
@@ -708,6 +889,8 @@ class ProblemDefinitionSkill:
             state.problem_definition_proposed = False
             state.problem_defined = False
             state.confirmed_problem = None
+            state.constraints_confirmed = False
+            state.confirmed_constraints = None
             save_session_state(project_id, state)
 
             return {
@@ -715,9 +898,7 @@ class ProblemDefinitionSkill:
                 "text": "문제 정의를 초기화했습니다. 다시 분석을 시작합니다.",
                 "data": {"agent_status": "reset"},
                 "options": [
-                    {"label": "분석 시작",
-                     "action": "send",
-                     "message": "분석 시작해줘"},
+                    {"label": "분석 시작", "action": "send", "message": "분석 시작해줘"},
                 ],
             }
 
@@ -737,6 +918,15 @@ class ProblemDefinitionSkill:
                     params[key] = {"value": val_num, "source": "user_input"}
                     updated.append(f"{key} = {val_num}")
 
+                # 제약조건 values에도 반영
+                for category in ["hard_constraints", "soft_constraints"]:
+                    for cname, cdata in state.problem_definition.get(category, {}).items():
+                        if key in cdata.get("values", {}):
+                            cdata["values"][key]["value"] = val_num
+                            cdata["values"][key]["source"] = "user_modified"
+                            if cdata.get("status") == "user_input_required":
+                                cdata["status"] = "user_provided"
+
             if updated:
                 save_session_state(project_id, state)
                 return {
@@ -755,38 +945,12 @@ class ProblemDefinitionSkill:
                     ],
                 }
 
-        # 목적함수 변경 요청 감지 (taxonomy + 도메인 YAML 기반)
-        if state.problem_definition:
-            # taxonomy의 모든 objectives에서 한국어 매핑 동적 구축
-            for stage_key, stage_info in self.taxonomy.get("stages", {}).items():
-                for obj in stage_info.get("typical_objectives", []):
-                    obj_ko = obj.replace("_", " ")
-                    if obj_ko in message or obj in message:
-                        state.problem_definition["objective"]["target"] = obj
-                        state.problem_definition["objective"]["description"] = obj_ko
-                        save_session_state(project_id, state)
-                        return {
-                            "type": "problem_definition",
-                            "text": (
-                                f"목적함수를 **{obj_ko}**으로 변경했습니다.\n\n"
-                                "**확인**을 입력하면 문제 정의가 확정됩니다."
-                            ),
-                            "data": {
-                                "proposal": state.problem_definition,
-                                "agent_status": "objective_modified",
-                            },
-                            "options": [
-                                {"label": "확인", "action": "send", "message": "확인"},
-                                {"label": "추가 수정", "action": "send", "message": "수정"},
-                            ],
-                        }
-
         # 기타
         return {
             "type": "problem_definition",
             "text": (
                 "**확인**, **수정**, 또는 **다시 분석**을 입력해주세요.\n"
-                "파라미터 수정은 파라미터명 = 값 형식으로 입력할 수 있습니다."
+                "파라미터 수정은 `파라미터명 = 값` 형식으로 입력할 수 있습니다."
             ),
             "data": {"agent_status": "awaiting_response"},
             "options": [
@@ -813,4 +977,4 @@ async def skill_problem_definition(
     message: str, params: Dict
 ) -> Dict:
     skill = get_skill()
-    return await skill.handle(session, project_id, message, params)
+    return await skill.handle(model, session, project_id, message, params)

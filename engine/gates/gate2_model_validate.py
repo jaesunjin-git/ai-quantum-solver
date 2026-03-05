@@ -1246,13 +1246,12 @@ def to_text_summary(result: Dict) -> str:
 def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str]):
     """
     Gate2 구조 검증: LLM이 생성한 제약식의 구조적 결함을 자동 교정.
-    1) source_file이 있는 param에 index 누락 -> [루프변수] 추가
-    2) 제약 내부에서 [i,d] 참조하는데 for_each에 i in I 누락 -> 추가
-    3) expression 문자열의 옛 컬럼명 치환
+    1) source_file이 있는 param에 index 누락 -> 추가
+    2) for_each에 없는 루프변수가 제약 내부에서 참조됨 -> 추가
+       단, sum.over에 이미 선언된 변수는 제외 (sum 내부에서 처리되므로)
     """
     import json as _json
 
-    # 데이터 소스 파라미터 식별 (source_file 또는 source_column이 있는 param)
     constraints = model.get("constraints", [])
     sets_by_id = {}
     for s in model.get("sets", []):
@@ -1260,39 +1259,70 @@ def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str
 
     fix_count = 0
 
+    def collect_sum_over_vars(node):
+        """sum.over에 선언된 루프 변수를 수집"""
+        result = set()
+        if not isinstance(node, dict):
+            return result
+        if "sum" in node and isinstance(node["sum"], dict):
+            over = node["sum"].get("over", "")
+            for m in re.finditer(r"(\w+)\s+in\s+\w+", over):
+                result.add(m.group(1))
+            # sum 내부 coeff도 탐색
+            if "coeff" in node["sum"]:
+                result |= collect_sum_over_vars(node["sum"]["coeff"])
+        for key in ["lhs", "rhs", "coeff"]:
+            if key in node:
+                result |= collect_sum_over_vars(node[key])
+        for key in ["add", "subtract", "multiply"]:
+            if key in node and isinstance(node[key], list):
+                for item in node[key]:
+                    result |= collect_sum_over_vars(item)
+        return result
+
     for con in constraints:
         cname = con.get("name", "unknown")
         for_each = con.get("for_each", "")
         con_json = _json.dumps(con, ensure_ascii=False)
 
-        # --- Step 1: for_each 누락 루프 변수 추가 ---
-        # 제약 JSON에서 사용된 인덱스 변수 탐지
-        index_refs = set(re.findall(r'\[([a-z])(?:,[a-z])*\]', con_json))
-        # for_each에서 이미 선언된 변수
-        declared_vars = set(re.findall(r'(\w+)\s+in\s+(\w+)', for_each))
-        declared_idx = {v[0] for v in declared_vars}
+        # sum.over에 선언된 변수 수집
+        sum_vars = set()
+        sum_vars |= collect_sum_over_vars(con.get("lhs", {}))
+        sum_vars |= collect_sum_over_vars(con.get("rhs", {}))
 
-        for idx_var in index_refs:
-            if idx_var not in declared_idx:
-                # 이 변수에 맞는 set 찾기 (i->I, d->D, j->J)
-                set_id = idx_var.upper()
-                if set_id in sets_by_id:
-                    new_loop = f"{idx_var} in {set_id}"
-                    if for_each:
-                        con["for_each"] = f"{new_loop}, {for_each}"
-                    else:
-                        con["for_each"] = new_loop
-                    for_each = con["for_each"]
-                    fix_count += 1
-                    corrections[f"struct_for_each_{cname}_{idx_var}"] = {
-                        "type": "for_each_fix",
-                        "old": for_each,
-                        "new": con["for_each"],
-                    }
-                    logger.info(f"Struct fix [{cname}]: added '{new_loop}' to for_each")
+        # 제약 JSON에서 사용된 인덱스 변수 탐지 (예: [i,d], [d], [j,d])
+        index_refs = set()
+        for m in re.findall(r'\[([a-z](?:,[a-z])*)\]', con_json):
+            for v in m.split(','):
+                index_refs.add(v.strip())
+
+        # for_each에서 이미 선언된 변수
+        declared_vars = set()
+        for m in re.finditer(r"(\w+)\s+in\s+(\w+)", for_each):
+            declared_vars.add(m.group(1))
+
+        # for_each에 추가해야 할 변수 = (인덱스 참조) - (이미 선언) - (sum.over에서 처리)
+        missing_vars = index_refs - declared_vars - sum_vars
+
+        for idx_var in sorted(missing_vars):
+            set_id = idx_var.upper()
+            if set_id in sets_by_id:
+                new_loop = f"{idx_var} in {set_id}"
+                if for_each:
+                    con["for_each"] = f"{new_loop}, {for_each}"
+                else:
+                    con["for_each"] = new_loop
+                for_each = con["for_each"]
+                fix_count += 1
+                corrections[f"struct_for_each_{cname}_{idx_var}"] = {
+                    "type": "for_each_fix",
+                    "old": "missing",
+                    "new": con["for_each"],
+                }
+                logger.info(f"Struct fix [{cname}]: added '{new_loop}' to for_each")
 
         # --- Step 2: source_file 있는 param에 index 누락 -> 추가 ---
-        def fix_param_nodes(node, constraint_name):
+        def fix_param_nodes(node, constraint_name, parent_sum_var=None):
             nonlocal fix_count
             if not isinstance(node, dict):
                 return
@@ -1301,11 +1331,14 @@ def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str
                 has_source = bool(p.get("source_file") or p.get("source_column"))
                 has_index = bool(p.get("index"))
                 if has_source and not has_index:
-                    # for_each에서 첫 번째 루프 변수를 인덱스로 사용
-                    fe = con.get("for_each", "")
-                    loop_vars = re.findall(r'(\w+)\s+in\s+(\w+)', fe)
-                    if loop_vars:
-                        idx_var = loop_vars[0][0]
+                    # sum.over 변수 또는 for_each 첫 번째 변수를 인덱스로 사용
+                    if parent_sum_var:
+                        idx_var = parent_sum_var
+                    else:
+                        fe = con.get("for_each", "")
+                        loop_vars = re.findall(r"(\w+)\s+in\s+(\w+)", fe)
+                        idx_var = loop_vars[0][0] if loop_vars else None
+                    if idx_var:
                         p["index"] = f"[{idx_var}]"
                         fix_count += 1
                         pname = p.get("name", "?")
@@ -1315,18 +1348,24 @@ def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str
                             "new": p["index"],
                         }
                         logger.info(f"Struct fix [{constraint_name}]: param '{pname}' index set to '{p["index"]}'")
-            # 재귀 탐색
+
+            # sum 노드: over에서 루프변수 추출하여 하위에 전달
+            if "sum" in node and isinstance(node["sum"], dict):
+                s = node["sum"]
+                over = s.get("over", "")
+                sv = re.findall(r"(\w+)\s+in\s+\w+", over)
+                sum_loop_var = sv[0] if sv else parent_sum_var
+                if "coeff" in s:
+                    fix_param_nodes(s["coeff"], constraint_name, sum_loop_var)
+                # sum 내부 var는 수정 불필요
+
             for key in ["lhs", "rhs", "coeff"]:
                 if key in node:
-                    fix_param_nodes(node[key], constraint_name)
+                    fix_param_nodes(node[key], constraint_name, parent_sum_var)
             for key in ["add", "subtract", "multiply"]:
                 if key in node and isinstance(node[key], list):
                     for item in node[key]:
-                        fix_param_nodes(item, constraint_name)
-            if "sum" in node and isinstance(node["sum"], dict):
-                fix_param_nodes(node["sum"], constraint_name)
-                if "coeff" in node["sum"]:
-                    fix_param_nodes(node["sum"]["coeff"], constraint_name)
+                        fix_param_nodes(item, constraint_name, parent_sum_var)
 
         fix_param_nodes(con.get("lhs", {}), cname)
         fix_param_nodes(con.get("rhs", {}), cname)
@@ -1337,5 +1376,3 @@ def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str
         logger.info("Struct validation: no structural fixes needed")
 
     return fix_count
-
-

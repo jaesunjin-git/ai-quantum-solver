@@ -666,7 +666,15 @@ class ProblemDefinitionSkill:
             return None
 
         # detection_hints에서 키워드 수집
+        # sub-param에 독립 hints가 있으면 우선 사용
         hints = cdata.get("detection_hints", {})
+        sub_hints = None
+        for pid, pinfo in (cdata.get("parameters") or {}).items():
+            if pid == param_name and isinstance(pinfo, dict):
+                sub_hints = pinfo.get("detection_hints", {})
+                break
+        if sub_hints:
+            hints = sub_hints
         all_keywords = []
         if isinstance(hints, dict):
             for lang_keywords in hints.values():

@@ -1,0 +1,96 @@
+﻿# AI Quantum Solver - Constraint Extraction Prompts
+# Version: 1.0
+# Used by: ProblemDefinitionSkill (Phase B - LLM one-by-one extraction)
+
+version: "1.0"
+
+# 단일 제약조건 값 추출 프롬프트 (1회 LLM 호출용)
+single_extraction_prompt: |
+  You are a data extraction expert for crew scheduling optimization.
+
+  TASK: Extract the value for ONE specific constraint parameter from the given data.
+
+  Constraint: {constraint_name_ko} ({constraint_name})
+  Parameter: {parameter_name}
+  Description: {description}
+  Expected unit: {unit}
+  Typical range: {typical_range}
+  
+  Detection hints (keywords to look for):
+  {detection_hints}
+
+  DATA CONTEXT:
+  {data_context}
+
+  RULES:
+  1. Return ONLY the numeric value if found, or "NOT_FOUND" if not present.
+  2. Convert to the expected unit (e.g., hours -> minutes).
+  3. Do NOT guess or hallucinate values.
+  4. If multiple values are possible, return the most specific one.
+  5. Include brief evidence (the exact text/cell where you found it).
+
+  RESPONSE FORMAT (JSON only):
+  {{"value": <number or "NOT_FOUND">, "confidence": <0.0-1.0>, "evidence": "<source text>"}}
+
+# 조건부 제약조건의 trigger 값 추출 프롬프트
+conditional_extraction_prompt: |
+  You are a data extraction expert for crew scheduling optimization.
+
+  TASK: Determine if a CONDITIONAL constraint is applicable and extract its parameters.
+
+  Constraint: {constraint_name_ko} ({constraint_name})
+  Description: {description}
+  
+  TRIGGER condition: {trigger_description}
+  CONSEQUENCE if triggered: {consequence_description}
+
+  DATA CONTEXT:
+  {data_context}
+
+  RULES:
+  1. First determine if the trigger condition is mentioned in the data.
+  2. If yes, extract both the trigger threshold and the consequence value.
+  3. If not found, return "NOT_FOUND" for both.
+  4. Do NOT guess values.
+
+  RESPONSE FORMAT (JSON only):
+  {{
+    "trigger_applicable": <true/false>,
+    "trigger_value": <number or "NOT_FOUND">,
+    "consequence_value": <number or "NOT_FOUND">,
+    "confidence": <0.0-1.0>,
+    "evidence": "<source text>"
+  }}
+
+# 복합 제약조건의 개별 파라미터 추출 프롬프트
+compound_extraction_prompt: |
+  You are a data extraction expert for crew scheduling optimization.
+
+  TASK: Extract values for a COMPOUND constraint with multiple parameters.
+
+  Constraint: {constraint_name_ko} ({constraint_name})
+  Description: {description}
+
+  Parameters to extract:
+  {parameters_list}
+
+  DATA CONTEXT:
+  {data_context}
+
+  RULES:
+  1. Extract each parameter independently.
+  2. Return "NOT_FOUND" for any parameter not in the data.
+  3. Do NOT guess values.
+
+  RESPONSE FORMAT (JSON only):
+  {{
+    "parameters": {{
+      "<param_name>": {{"value": <number or "NOT_FOUND">, "confidence": <0.0-1.0>, "evidence": "<text>"}},
+      ...
+    }}
+  }}
+
+confirmation_keywords:
+  positive: ["confirm", "ok", "yes", "approve", "확인", "네", "좋습니다", "승인", "진행"]
+  modify: ["modify", "change", "adjust", "수정", "변경", "조정"]
+  restart: ["restart", "reset", "다시", "재시작", "처음부터"]

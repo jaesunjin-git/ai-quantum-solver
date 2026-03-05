@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # main.py — v2.0
 # ============================================================
 # 변경 이력
@@ -53,6 +53,32 @@ app.include_router(version_router)       # /api/chat
 app.include_router(project_router)    # /api/projects
 app.include_router(settings_router)   # /api/settings
 
+def _migrate_session_states(db):
+    """기존 core.session_states 테이블에 새 컬럼을 안전하게 추가"""
+    new_columns = {
+        "problem_defined": "BOOLEAN DEFAULT FALSE",
+        "problem_definition": "TEXT",
+        "confirmed_problem": "TEXT",
+        "data_normalized": "BOOLEAN DEFAULT FALSE",
+        "normalization_mapping": "TEXT",
+        "normalized_data_summary": "TEXT",
+        "structural_normalization_done": "BOOLEAN DEFAULT FALSE",
+        "phase1_summary": "TEXT",
+        "constraints_confirmed": "BOOLEAN DEFAULT FALSE",
+        "confirmed_constraints": "TEXT",
+        "data_facts": "TEXT",
+    }
+    for col_name, col_type in new_columns.items():
+        try:
+            db.execute(text(
+                f"ALTER TABLE core.session_states ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+            ))
+        except Exception:
+            pass
+    db.commit()
+    print("Session states migration check completed.")
+
+
 @app.on_event("startup")
 def startup():
     # =========================================================
@@ -72,7 +98,17 @@ def startup():
     finally:
         db.close()
 
-    # 2. 테이블 생성
+    # 2. Auto-migration (add new columns to existing tables)
+    db2 = SessionLocal()
+    try:
+        _migrate_session_states(db2)
+    except Exception as e:
+        print(f"Migration warning: {e}")
+        db2.rollback()
+    finally:
+        db2.close()
+
+    # 3. Create new tables
     Base.metadata.create_all(bind=engine)
 
     # =========================================================

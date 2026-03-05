@@ -1128,8 +1128,8 @@ def _check_node_refs(node: Any, cname: str, side: str,
                 is_fuzzy_col = True
                 corrections[f"param_{param_ref}"] = {
                     "type": "column_name_fix",
-                    "original": param_ref,
-                    "corrected": fuzzy_matched,
+                    "old": param_ref,
+                    "new": fuzzy_matched,
                     "location": f"{cname}.{side}"
                 }
         if param_ref and param_ref not in param_names and not has_source and not is_data_col and not is_fuzzy_col:

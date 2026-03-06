@@ -83,6 +83,18 @@ class BuildContext:
         if val is not None:
             # list/tuple인 경우: key를 set에서 찾아 인덱스로 변환
             if isinstance(val, (list, tuple)):
+                # 0) key가 set의 원소이면 해당 위치로 변환 (trip_id=3001 -> index=0)
+                for _sid, _svals in self.set_map.items():
+                    if isinstance(_svals, (list, tuple)):
+                        try:
+                            _idx = list(_svals).index(key)
+                            if _idx < len(val):
+                                _r = val[_idx]
+                                if isinstance(_r, (int, float)):
+                                    return int(_r) if isinstance(_r, float) and _r == int(_r) else _r
+                                return _r
+                        except (ValueError, IndexError):
+                            pass
                 # 1) key가 정수 인덱스이고 범위 내이면 직접 사용
                 if isinstance(key, int) and 0 <= key < len(val):
                     result = val[key]
@@ -250,6 +262,14 @@ def eval_node(node: Any, binding: Dict[str, Any], ctx: BuildContext) -> Any:
             index_str = param_info.get('index', '')
         else:
             return 0
+
+        def _to_int_if_whole(v):
+            """CP-SAT 호환: float가 정수값이면 int로 변환"""
+            if isinstance(v, float) and v == v:  # NaN 체크
+                if v == int(v):
+                    return int(v)
+            return v
+
         if not index_str:
             val = ctx.get_param_scalar(name)
             if val is None:
@@ -258,13 +278,13 @@ def eval_node(node: Any, binding: Dict[str, Any], ctx: BuildContext) -> Any:
                     for idx_key in binding.values():
                         indexed_val = ctx.get_param_indexed(name, idx_key)
                         if indexed_val != 0 or ctx.param_map.get(name) is not None:
-                            return indexed_val
+                            return _to_int_if_whole(indexed_val)
                 logger.warning(f"Parameter '{name}' not found in param_map, using 0")
                 return 0
-            return val
+            return _to_int_if_whole(val)
         index_names = parse_index_string(index_str)
         key = resolve_index(index_names, binding)
-        return ctx.get_param_indexed(name, key[0] if len(key) == 1 else key)
+        return _to_int_if_whole(ctx.get_param_indexed(name, key[0] if len(key) == 1 else key))
 
     # sum 노드
     if 'sum' in node:
@@ -441,7 +461,51 @@ def build_objective(
         val = eval_node(lhs_node, {}, ctx)
         return (obj_type, val)
 
-    # 없으면 None 반환 (fallback 필요)
+    # lhs가 없으면 expression 문자열에서 파싱 시도
+    # 패턴: sum(var[idx] for idx in SET)
+    if expr:
+        import re
+        # sum(u[d] for d in D) 패턴
+        m = re.match(r'sum\(\s*(\w+)\[(\w+)\]\s+for\s+(\w+)\s+in\s+(\w+)\s*\)', expr)
+        if m:
+            var_name, idx_name, loop_var, set_name = m.groups()
+            set_vals = ctx.get_set(set_name)
+            if set_vals is not None:
+                total = None
+                for sv in set_vals:
+                    v = ctx.get_var(var_name, sv)
+                    if v is not None:
+                        total = v if total is None else total + v
+                if total is not None:
+                    logger.info(f"Objective parsed from expression: {expr}")
+                    return (obj_type, total)
+
+        # sum(coeff[i]*var[i,d] for i in I for d in D) 패턴
+        m2 = re.match(
+            r'sum\(\s*(\w+)\[(\w+)\]\s*\*\s*(\w+)\[(\w+(?:,\w+)*)\]'
+            r'\s+for\s+(\w+)\s+in\s+(\w+)\s+for\s+(\w+)\s+in\s+(\w+)\s*\)',
+            expr
+        )
+        if m2:
+            coeff_name, c_idx, var_name, v_indices, l1, s1, l2, s2 = m2.groups()
+            set1 = ctx.get_set(s1)
+            set2 = ctx.get_set(s2)
+            if set1 is not None and set2 is not None:
+                total = None
+                for sv1 in set1:
+                    coeff = ctx.get_param_indexed(coeff_name, sv1)
+                    if isinstance(coeff, float) and coeff == int(coeff):
+                        coeff = int(coeff)
+                    for sv2 in set2:
+                        v = ctx.get_var(var_name, (sv1, sv2))
+                        term = coeff * v if coeff != 0 else 0
+                        if term != 0:
+                            total = term if total is None else total + term
+                if total is not None:
+                    logger.info(f"Objective parsed from expression (2-loop): {expr}")
+                    return (obj_type, total)
+
+    # 파싱 실패
     return (obj_type, None)
 
 

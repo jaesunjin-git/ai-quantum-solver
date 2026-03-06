@@ -243,6 +243,8 @@ async def skill_math_model(model, session: CrewSession, project_id: str, message
                             model_str = model_str.replace(old_token, new_token)
                             applied_count += 1
                             logger.info(f"Applied correction: {old_name} -> {new_name}")
+                        # expression 문자열 내부도 치환 (따옴표 없는 형태)
+                        model_str = model_str.replace(old_name, new_name)
                 if applied_count > 0:
                     model = _json.loads(model_str)
                     logger.info(f"Gate2 corrections applied: {applied_count} column name fixes")

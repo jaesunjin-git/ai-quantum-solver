@@ -659,3 +659,28 @@ soft:
       en:
       - driving
       - balance
+hard_constraints:
+  duty_count:
+    name_ko: 사업 수
+    type: single
+    description: 전체 듀티(사업)의 수. 주간+야간 합계.
+    parameters:
+      duty_count:
+        role: set_size
+        unit: count
+        typical_range:
+        - 20
+        - 100
+    detection_hints:
+      ko:
+      - 사업수
+      - 총 사업
+      - 듀티 수
+      - 사업 수
+      - 주간사업
+      - 야간사업
+      en:
+      - duty_count
+      - num_duties
+      - total_duties
+    applicability: all

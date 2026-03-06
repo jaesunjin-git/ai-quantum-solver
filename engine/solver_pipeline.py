@@ -1,9 +1,10 @@
-﻿# engine/solver_pipeline.py
+from __future__ import annotations
+import os
+# engine/solver_pipeline.py
 # ============================================================
 # Solver Pipeline: 수학 모델 IR -> 컴파일 -> 실행 -> 결과 통합
 # ============================================================
 
-from __future__ import annotations
 
 import logging
 import time
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from engine.compiler import get_compiler
 from engine.compiler.base import DataBinder, CompileResult
+from engine.result_interpreter import interpret_result, save_artifacts
 from engine.executor import get_executor
 from engine.gates.gate3_compile_check import run as run_gate3
 from engine.executor.base import ExecuteResult
@@ -69,6 +71,7 @@ class SolverPipeline:
     ) -> PipelineResult:
         """전체 파이프라인 실행"""
 
+        self._current_project_id = project_id
         logger.info(f"Pipeline: solver={solver_id}, project={project_id}")
 
         #  Phase 1: Data Binding 
@@ -305,6 +308,27 @@ class SolverPipeline:
             # 하위 호환 유지
             "compile_warnings": warnings_list,
         }
+
+
+        # ── 결과 해석 및 산출물 저장 ──
+        try:
+            project_dir = f"uploads/{self._current_project_id}" if hasattr(self, '_current_project_id') else None
+            if project_dir and os.path.isdir(project_dir):
+                interpreted = interpret_result(
+                    solution=execute_result.solution,
+                    math_model=math_model,
+                    project_dir=project_dir,
+                    solver_id=solver_id,
+                    solver_name=solver_name,
+                    status=execute_result.status,
+                    objective_value=execute_result.objective_value,
+                )
+                saved = save_artifacts(project_dir, execute_result.solution, interpreted, solver_id)
+                summary["interpreted_result"] = interpreted
+                summary["artifacts"] = {k: str(v) for k, v in saved.items()}
+                logger.info(f"Result interpreted: {interpreted['objective_label']}, artifacts={list(saved.keys())}")
+        except Exception as e:
+            logger.warning(f"Result interpretation failed: {e}")
 
         return summary
 

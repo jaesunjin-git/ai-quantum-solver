@@ -56,7 +56,7 @@ export function SolverView({
           project_id: projectId,
           solver_id: solver.solver_id,
           solver_name: `${solver.provider} ${solver.solver_name}`.trim(),
-          time_limit_sec: 900,
+          time_limit_sec: 120,
         }),
       });
       if (!res.ok) { const t = await res.text(); throw new Error(t); }

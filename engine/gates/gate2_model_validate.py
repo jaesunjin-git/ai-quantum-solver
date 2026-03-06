@@ -1030,8 +1030,30 @@ def run(math_model: Dict,
             logger.warning(f"Gate2 warn   [{i+1}/{len(warnings)}]: {w}")
 
 
+    # project_id 추출 (uploads 경로에서)
+    _struct_project_id = None
+    if dataframes:
+        import re as _re
+        for _df_key in dataframes:
+            _m = _re.search(r'uploads[/\\](\d+)', str(_df_key))
+            if _m:
+                _struct_project_id = _m.group(1)
+                break
+    if _struct_project_id is None:
+        # model에서 추출 시도
+        for _s in math_model.get("sets", []):
+            _sf = _s.get("source_file", "")
+            if "normalized/" in _sf:
+                import os as _os2
+                for _d in sorted(_os2.listdir("uploads"), key=lambda x: -int(x) if x.isdigit() else 0):
+                    if _d.isdigit() and _os2.path.exists(f"uploads/{_d}/normalized"):
+                        _struct_project_id = _d
+                        break
+                break
+    logger.info(f"Struct validation: project_id={_struct_project_id}")
+
     # ★ 구조 검증: for_each 누락, param index 누락 자동 교정
-    struct_fixes = _fix_constraint_structure(math_model, corrections, warnings)
+    struct_fixes = _fix_constraint_structure(math_model, corrections, warnings, set_sizes=set_sizes, project_id=_struct_project_id)
     if struct_fixes > 0:
         corrections['structural_fixes'] = struct_fixes
 
@@ -1243,7 +1265,7 @@ def to_text_summary(result: Dict) -> str:
     return "\n".join(lines)
 
 
-def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str]):
+def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str], set_sizes: Dict[str, int] = None, project_id: Any = None):
     """
     Gate2 구조 검증: LLM이 생성한 제약식의 구조적 결함을 자동 교정.
     1) source_file이 있는 param에 index 누락 -> 추가
@@ -1370,6 +1392,59 @@ def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str
         fix_param_nodes(con.get("lhs", {}), cname)
         fix_param_nodes(con.get("rhs", {}), cname)
 
+    if set_sizes is None:
+        set_sizes = {}
+
+    # ── Set D 크기 교정: duty_count 파라미터로 ──
+    try:
+        params = {p.get("id") or p.get("name"): p for p in model.get("parameters", [])}
+        sets = model.get("sets", [])
+        duty_count = None
+        # confirmed_problem에서 duty_count 찾기
+        for pid, pinfo in params.items():
+            if pid in ("duty_count", "총 사업수"):
+                val = pinfo.get("value") or pinfo.get("default_value")
+                if val is not None:
+                    try:
+                        duty_count = int(float(val))
+                    except (ValueError, TypeError):
+                        pass
+        # parameters.csv에서 직접 찾기
+        if duty_count is None:
+            import pandas as _pd
+            import os as _os
+            _norm_dir = f"uploads/{project_id}/normalized" if project_id else None
+            _csv_path = _os.path.join(_norm_dir, "parameters.csv") if _norm_dir and _os.path.exists(_os.path.join(_norm_dir, "parameters.csv")) else None
+            if _csv_path:
+                _df = _pd.read_csv(_csv_path, dtype=str)
+                if "param_name" in _df.columns:
+                    for _, _row in _df.iterrows():
+                        _pn = str(_row.get("param_name", ""))
+                        if _pn in ("총 사업수", "duty_count"):
+                            try:
+                                duty_count = int(float(_row["value"]))
+                            except:
+                                pass
+        if duty_count and duty_count > 0:
+            for s in sets:
+                if s.get("id") == "D" and s.get("source_type") == "range":
+                    old_size = s.get("size", 0)
+                    if old_size > duty_count * 2:
+                        s["size"] = duty_count
+                        set_sizes["D"] = duty_count
+                        fix_count += 1
+                        corrections["set_D_size_fix"] = {
+                            "type": "set_size_fix",
+                            "old": old_size,
+                            "new": duty_count,
+                        }
+                        warnings.append(
+                            f"Set D size corrected: {old_size} -> {duty_count} (from duty_count)"
+                        )
+                        logger.info(f"Struct fix [Set D]: size {old_size} -> {duty_count}")
+    except Exception as _e:
+        logger.warning(f"Set D size correction failed: {_e}")
+
     # ── overlap_pairs 주입: 3중 루프 제약에 사전 필터링 적용 ──
     try:
         import json as _json
@@ -1381,9 +1456,14 @@ def _fix_constraint_structure(model: Dict, corrections: Dict, warnings: List[str
             if len(loop_vars) >= 3 and "i" in loop_vars and "j" in loop_vars:
                 # uploads/ 하위에서 overlap_pairs.json 탐색
                 op_found = False
-                for dirpath, dirs, files in _os.walk("uploads"):
-                    if "overlap_pairs.json" in files:
-                        op_path = _os.path.join(dirpath, "overlap_pairs.json")
+                _op_dirs = [f"uploads/{project_id}/normalized", f"uploads/{project_id}/phase1"] if project_id else []
+                op_path = None
+                for _opd in _op_dirs:
+                    _opp = _os.path.join(_opd, "overlap_pairs.json")
+                    if _os.path.exists(_opp):
+                        op_path = _opp
+                        break
+                if op_path:
                         with open(op_path, "r", encoding="utf-8") as _f:
                             pairs = _json.load(_f)
                         if pairs:

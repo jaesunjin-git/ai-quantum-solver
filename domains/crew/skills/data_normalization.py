@@ -562,10 +562,29 @@ Each mapping must have: target_table, source_file, source_sheet, transform_type,
                     confirmed = state.confirmed_problem or {}
                     params = confirmed.get("parameters", {})
                     if params:
+                        # Phase 1 파라미터를 fallback으로 로드
+                        _p1_values = {}
+                        _p1_path = upload_dir / "phase1" / "parameters_raw.csv"
+                        if _p1_path.exists():
+                            try:
+                                _p1_df = pd.read_csv(str(_p1_path), dtype=str)
+                                if "semantic_id" in _p1_df.columns and "value" in _p1_df.columns:
+                                    for _, _r in _p1_df.iterrows():
+                                        _sid = str(_r.get("semantic_id", ""))
+                                        _val = str(_r.get("value", ""))
+                                        if _sid and _val and _val != "nan":
+                                            _p1_values[_sid] = _val
+                            except Exception:
+                                pass
                         rows = []
                         for pname, pinfo in params.items():
                             value = pinfo.get("value") if isinstance(pinfo, dict) else pinfo
                             src = pinfo.get("source", "confirmed") if isinstance(pinfo, dict) else "confirmed"
+                            # value가 None이면 Phase 1에서 fallback
+                            if value is None or (isinstance(value, float) and str(value) == "nan"):
+                                if pname in _p1_values:
+                                    value = _p1_values[pname]
+                                    src = "phase1_fallback"
                             rows.append({"param_name": pname, "value": value, "unit": "minutes", "source": src})
                         if rows:
                             df = pd.DataFrame(rows)

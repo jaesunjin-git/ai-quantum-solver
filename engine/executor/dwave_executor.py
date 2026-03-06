@@ -89,7 +89,7 @@ class DWaveExecutor(BaseExecutor):
                     var_name = v.variables[0] if hasattr(v, 'variables') else str(v)
                     solution[vid] = best.sample.get(var_name, 0)
 
-            obj_val = best.energy if hasattr(best, 'energy') else None
+            obj_val = float(best.energy) if hasattr(best, 'energy') and best.energy is not None else None
 
             logger.info(f"CQM: status={status}, energy={obj_val}, time={elapsed:.2f}s, feasible={len(feasible)}/{len(sampleset)}")
 

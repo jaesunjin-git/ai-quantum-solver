@@ -274,16 +274,16 @@ class ORToolsCompiler(BaseCompiler):
 
     def _parse_objective_cpsat_struct(self, model, var_map, obj_def, ctx) -> bool:
         """구조화된 목적함수 처리"""
-        obj_type = obj_def.get("type", "minimize")
-        lhs_node = obj_def.get("lhs")
+        from engine.compiler.struct_builder import build_objective
+        obj_type, obj_val = build_objective(obj_def, ctx)
 
-        if lhs_node:
+        if obj_val is not None:
             try:
-                obj_val = eval_node(lhs_node, {}, ctx)
                 if obj_type == "minimize":
                     model.minimize(obj_val)
                 else:
                     model.maximize(obj_val)
+                logger.info(f"Objective set: {obj_type} (structured/expression)")
                 return True
             except Exception as e:
                 logger.warning(f"Structured objective failed: {e}")

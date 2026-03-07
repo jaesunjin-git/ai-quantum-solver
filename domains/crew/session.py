@@ -52,6 +52,7 @@ class SessionState:
 
     # ── Constraint Confirmation (TASK 3) ──
     constraints_confirmed: bool = False
+    objective_changing: bool = False  # 목적함수 변경 진행 중
     confirmed_constraints: Optional[Dict] = None
 
 

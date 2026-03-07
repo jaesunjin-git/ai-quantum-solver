@@ -409,19 +409,29 @@ class ProblemDefinitionSkill:
                 default_weight = round((weight_range[0] + weight_range[1]) / 2, 2)
 
             # _meta에서 changeable/fixed 정보 추출
+            # ── Phase B: soft도 값 추출 ──
+            ctype_s = cdata.get('type', 'single_param')
+            extraction_s = await self._extract_constraint_value(
+                model, cname, cdata, ctype_s, phase1_data, state
+            )
+            s_values = extraction_s.get('values', {})
+            s_status = extraction_s.get('status', 'default')
+
+            # _meta에서 changeable/fixed 정보 추출
             s_meta = dk.get_constraint_meta(cname) if dk else {}
             s_fixed = s_meta.get('fixed_category', False)
             s_changeable = not s_fixed
-            
+
             soft_results[cname] = {
-                "name_ko": cdata.get("name_ko", cname),
-                "type": cdata.get("type", "single_param"),
-                "description": cdata.get("description", ""),
-                "weight": default_weight,
-                "weight_range": weight_range,
-                "status": "default",
-                "fixed": s_fixed,
-                "changeable": s_changeable,
+                'name_ko': cdata.get('name_ko', cname),
+                'type': ctype_s,
+                'description': cdata.get('description', ''),
+                'weight': default_weight,
+                'weight_range': weight_range,
+                'status': s_status,
+                'values': s_values,
+                'fixed': s_fixed,
+                'changeable': s_changeable,
             }
 
         return {"hard": hard_results, "soft": soft_results}
@@ -687,21 +697,44 @@ class ProblemDefinitionSkill:
 
         return fallback_cdata
     def _extract_compound(self, cname: str, cdata: dict, phase1_data: dict) -> dict:
-        params = cdata.get("parameters", {})
+        params = cdata.get('parameters', {})
+        # parameters가 list인 경우 dict로 변환
+        if isinstance(params, list):
+            params = {p: {} for p in params}
         values = {}
         all_found = True
-
-        for pname, pinfo in params.items():
+    
+        for pname in params:
+            pinfo = params[pname] if isinstance(params[pname], dict) else {}
             better_cdata = self._find_best_cdata_for_param(pname, cdata)
             value = self._search_phase1_params(pname, better_cdata, phase1_data)
             if value is not None:
-                values[pname] = {"value": value, "source": "phase1_data", "confidence": 0.8}
+                values[pname] = {'value': value, 'source': 'phase1_data', 'confidence': 0.8}
             else:
-                values[pname] = {"value": None, "source": "user_input_required"}
-                all_found = False
-
-        status = "extracted" if all_found else ("partial" if any(v["value"] is not None for v in values.values()) else "user_input_required")
-        return {"status": status, "values": values}
+                # Phase 1에서 못 찾으면 reference_ranges에서 기본값 조회
+                ref_value = self._lookup_reference_value(pname)
+                ref_range = pinfo.get('typical_range') if isinstance(pinfo, dict) else None
+                if ref_value is not None:
+                    values[pname] = {
+                        'value': ref_value,
+                        'source': 'reference_default',
+                        'confidence': 0.85,
+                        'reference_range': ref_range,
+                        'note': 'reference_ranges.yaml 기본값',
+                    }
+                else:
+                    values[pname] = {
+                        'value': None,
+                        'source': 'user_input_required',
+                        'reference_range': ref_range,
+                    }
+                    all_found = False
+    
+        status = 'extracted' if all_found else (
+            'partial' if any(v.get('value') is not None for v in values.values())
+            else 'user_input_required'
+        )
+        return {'status': status, 'values': values}
 
     def _extract_conditional(self, cname: str, cdata: dict, phase1_data: dict) -> dict:
         trigger = cdata.get("trigger", {})

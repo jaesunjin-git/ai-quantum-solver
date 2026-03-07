@@ -375,6 +375,11 @@ class ProblemDefinitionSkill:
                 model, cname, cdata, ctype, phase1_data, state
             )
 
+            # _meta에서 changeable/fixed 정보 추출
+            c_meta = dk.get_constraint_meta(cname) if dk else {}
+            c_fixed = c_meta.get('fixed_category', False)
+            c_changeable = not c_fixed
+            
             hard_results[cname] = {
                 "name_ko": cdata.get("name_ko", cname),
                 "type": ctype,
@@ -382,6 +387,8 @@ class ProblemDefinitionSkill:
                 "status": extraction.get("status", "unknown"),
                 "values": extraction.get("values", {}),
                 "computation_phase": extraction.get("computation_phase"),
+                "fixed": c_fixed,
+                "changeable": c_changeable,
             }
 
         # Soft constraints
@@ -401,6 +408,11 @@ class ProblemDefinitionSkill:
                 weight_range = cdata.get("weight_range", [0.1, 0.5])
                 default_weight = round((weight_range[0] + weight_range[1]) / 2, 2)
 
+            # _meta에서 changeable/fixed 정보 추출
+            s_meta = dk.get_constraint_meta(cname) if dk else {}
+            s_fixed = s_meta.get('fixed_category', False)
+            s_changeable = not s_fixed
+            
             soft_results[cname] = {
                 "name_ko": cdata.get("name_ko", cname),
                 "type": cdata.get("type", "single_param"),
@@ -408,6 +420,8 @@ class ProblemDefinitionSkill:
                 "weight": default_weight,
                 "weight_range": weight_range,
                 "status": "default",
+                "fixed": s_fixed,
+                "changeable": s_changeable,
             }
 
         return {"hard": hard_results, "soft": soft_results}
@@ -1262,7 +1276,8 @@ class ProblemDefinitionSkill:
             # dk에서 objectives 로드
             dk = self._load_domain(state)
             import yaml as _yaml
-            _constraints_path = "knowledge/domains/railway/constraints.yaml"
+            domain_name = state.problem_definition.get("domain", "railway")
+            _constraints_path = f"knowledge/domains/{domain_name}/constraints.yaml"
             try:
                 with open(_constraints_path, encoding="utf-8") as _f:
                     _cdata = _yaml.safe_load(_f)
@@ -1281,6 +1296,48 @@ class ProblemDefinitionSkill:
 
             if matched_obj:
                 oname, odata = matched_obj
+
+                # ── 경고 게이트: objective_changing 플래그 확인 ──
+                if not getattr(state, 'objective_changing', False):
+                    # 첫 번째 요청 → 경고 메시지 + 확인 요청
+                    state.objective_changing = True
+                    state._pending_objective = {"name": oname, "data": odata}
+                    save_session_state(project_id, state)
+
+                    old_obj = state.problem_definition.get("objective", {})
+                    old_desc = old_obj.get("description", old_obj.get("description_ko", "현재 목적함수"))
+                    new_desc = odata.get("description_ko", odata["description"])
+
+                    promote_info = ""
+                    promote_list = odata.get("promote_to_hard", [])
+                    if promote_list:
+                        promote_info = f"\n- 자동 Hard 승격 제약: {', '.join(promote_list)}"
+
+                    return {
+                        "type": "problem_definition",
+                        "text": (
+                            f"⚠️ **목적함수 변경 확인**\n\n"
+                            f"- 현재: {old_desc}\n"
+                            f"- 변경: **{new_desc}**\n"
+                            f"{promote_info}\n\n"
+                            f"**목적함수를 변경하면 제약조건이 새로 구성됩니다.**\n"
+                            f"현재 수정한 제약조건 편집 내용은 초기화됩니다.\n\n"
+                            f"계속하시겠습니까?"
+                        ),
+                        "data": {
+                            "agent_status": "objective_change_warning",
+                            "pending_objective": oname,
+                        },
+                        "options": [
+                            {"label": "✅ 계속 변경", "action": "send",
+                             "message": f"목적함수를 {new_desc}으로 변경"},
+                            {"label": "❌ 취소", "action": "send", "message": "취소"},
+                        ],
+                    }
+
+                # ── 두 번째 요청 (확인됨) → 실제 변경 + 제약조건 재구성 ──
+                state.objective_changing = False
+                state._pending_objective = None
                 old_obj = state.problem_definition.get("objective", {})
                 old_desc = old_obj.get("description", "알 수 없음")
 
@@ -1297,48 +1354,81 @@ class ProblemDefinitionSkill:
                     ],
                 }
 
-                # ── 연동: promote_to_hard / recommended_soft 자동 조정 ──
+                # ── 제약조건 재구성 ──
+                detected_data_types = set(state.problem_definition.get("detected_data_types", []))
+                topology = state.problem_definition.get("topology")
+                try:
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    new_constraints = loop.run_until_complete(
+                        self._determine_constraints_phased(
+                            None, state, project_id, dk,
+                            detected_data_types, topology
+                        )
+                    ) if not asyncio.get_event_loop().is_running() else (
+                        await self._determine_constraints_phased(
+                            None, state, project_id, dk,
+                            detected_data_types, topology
+                        )
+                    )
+                except Exception:
+                    new_constraints = await self._determine_constraints_phased(
+                        None, state, project_id, dk,
+                        detected_data_types, topology
+                    )
+
+                state.problem_definition["hard_constraints"] = new_constraints.get("hard", {})
+                state.problem_definition["soft_constraints"] = new_constraints.get("soft", {})
+
+                # promote_to_hard 처리
                 changes = []
                 promote_list = odata.get("promote_to_hard", [])
                 for cname in promote_list:
                     if cname in state.problem_definition.get("soft_constraints", {}):
                         moved = state.problem_definition["soft_constraints"].pop(cname)
-                        if "hard_constraints" not in state.problem_definition:
-                            state.problem_definition["hard_constraints"] = {}
                         state.problem_definition["hard_constraints"][cname] = moved
                         changes.append(f"  - **{cname}**: Soft → Hard (목적함수 연동)")
                         if dk:
                             dk.move_constraint(cname, "hard", force=True)
 
+                # 확정 상태 초기화 (재확인 필요)
+                state.constraints_confirmed = False
+                state.confirmed_constraints = None
                 save_session_state(project_id, state)
+
+                hard_count = len(state.problem_definition.get("hard_constraints", {}))
+                soft_count = len(state.problem_definition.get("soft_constraints", {}))
 
                 change_text = ""
                 if changes:
-                    change_text = "\n\n**연동 변경:**\n" + "\n".join(changes)
+                    change_text = "\n\n**자동 연동 변경:**\n" + "\n".join(changes)
 
                 return {
                     "type": "problem_definition",
                     "text": (
-                        f"✅ 목적함수를 변경했습니다.\n\n"
+                        f"✅ 목적함수를 변경하고 제약조건을 재구성했습니다.\n\n"
                         f"- 이전: {old_desc}\n"
                         f"- 변경: **{odata.get('description_ko', odata['description'])}**\n"
-                        f"- 수식: {odata.get('expression', '')}"
+                        f"- 수식: {odata.get('expression', '')}\n"
+                        f"- 재구성 결과: Hard {hard_count}개, Soft {soft_count}개"
                         f"{change_text}\n\n"
-                        f"**확인**을 입력하면 문제 정의가 확정됩니다."
+                        f"아래에서 제약조건을 확인하고 필요시 수정해주세요."
                     ),
+                    "view_mode": "problem_definition",
                     "data": {
                         "proposal": state.problem_definition,
-                        "agent_status": "objective_modified",
+                        "agent_status": "objective_changed_constraints_rebuilt",
                     },
                     "options": [
-                        {"label": "확인", "action": "send", "message": "확인"},
-                        {"label": "추가 수정", "action": "send", "message": "수정"},
+                        {"label": "✅ 확인", "action": "send", "message": "확인"},
+                        {"label": "✏️ 제약조건 수정", "action": "send", "message": "수정"},
                     ],
                 }
+
             else:
-                # 매칭 실패: 사용 가능한 목적함수 목록 표시
+                # 매칭 실패
                 obj_list = "\n".join([
-                    f"- {k}: {v.get('description_ko', v['description'])}"
+                    f"- **{k}**: {v.get('description_ko', v['description'])}"
                     for k, v in objectives_map.items()
                 ])
                 return {
@@ -1350,11 +1440,29 @@ class ProblemDefinitionSkill:
                     ),
                     "data": {"agent_status": "objective_change_failed"},
                     "options": [
-                        {"label": k, "action": "send", "message": f"목적함수를 {v.get('description_ko', k)}로 변경"}
+                        {"label": k, "action": "send",
+                         "message": f"목적함수를 {v.get('description_ko', k)}로 변경"}
                         for k, v in list(objectives_map.items())[:4]
                     ],
                 }
 
+        # ── 취소 처리 (objective_changing 중일 때) ──
+        if getattr(state, 'objective_changing', False) and ('취소' in msg_lower or 'cancel' in msg_lower):
+            state.objective_changing = False
+            state._pending_objective = None
+            save_session_state(project_id, state)
+            return {
+                "type": "problem_definition",
+                "text": "목적함수 변경을 취소했습니다. 현재 설정을 유지합니다.",
+                "data": {
+                    "proposal": state.problem_definition,
+                    "agent_status": "objective_change_cancelled",
+                },
+                "options": [
+                    {"label": "✅ 확인", "action": "send", "message": "확인"},
+                    {"label": "✏️ 수정", "action": "send", "message": "수정"},
+                ],
+            }
 
         # ── 제약조건 카테고리 변경 (hard↔soft) ──
         category_pattern = re.compile(

@@ -299,6 +299,10 @@ class CrewAgent:
                 action_map = {
                     "file_uploaded": "파일 업로드 완료",
                     "report": "데이터 분석 완료",
+                    "problem_definition": "문제 정의",
+                    "problem_defined": "문제 정의 확정",
+                    "normalization": "데이터 정규화",
+                    "normalization_complete": "정규화 완료",
                     "math_model": "수학 모델 생성",
                     "solver": "솔버 추천 완료",
                     "result": "최적화 실행 완료",

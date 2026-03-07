@@ -102,9 +102,10 @@ def build_guide_text(state: SessionState) -> str:
     steps = [
         ("1️⃣", "파일 업로드", state.file_uploaded),
         ("2️⃣", "데이터 분석", state.analysis_completed),
-        ("3️⃣", "수학 모델 생성", state.math_model_confirmed),
-        ("4️⃣", "솔버 추천", state.pre_decision_done),
-        ("5️⃣", "최적화 실행", state.optimization_done),
+        ("3️⃣", "문제 정의", getattr(state, 'problem_defined', False)),
+        ("4️⃣", "데이터 정규화", getattr(state, 'data_normalized', False)),
+        ("5️⃣", "수학 모델 생성", state.math_model_confirmed),
+        ("6️⃣", "솔버 실행", state.optimization_done),
     ]
     for icon, label, done in steps:
         status = "✅" if done else "⬜"
@@ -121,6 +122,16 @@ def build_next_options(state: SessionState) -> List[Dict]:
         ]
     if not state.analysis_completed:
         return [{"label": "📊 분석 시작", "action": "send", "message": "데이터 분석 시작해줘"}]
+    if not getattr(state, 'problem_defined', False):
+        return [
+            {"label": "📋 문제 정의 시작", "action": "send", "message": "문제 정의 시작"},
+            {"label": "📊 분석 결과", "action": "send", "message": "분석 결과 보여줘"},
+        ]
+    if not getattr(state, 'data_normalized', False):
+        return [
+            {"label": "📊 데이터 정규화", "action": "send", "message": "데이터 정규화 시작"},
+            {"label": "📋 문제 정의 수정", "action": "send", "message": "문제 정의 수정"},
+        ]
     if not state.math_model_confirmed:
         return [
             {"label": "📐 수학 모델 생성", "action": "send", "message": "수학 모델 생성해줘"},

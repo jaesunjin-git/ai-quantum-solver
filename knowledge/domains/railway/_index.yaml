@@ -1,58 +1,105 @@
 domain:
   name: railway
-  name_ko: "철도"
-  version: "2.0"
-  description: >
-    철도 승무원 스케줄링 도메인 지식.
-    도시철도(지하철), 고속철도(KTX), 일반철도, 화물 등 하위 도메인을 포함.
+  name_ko: 철도
+  version: '2.0'
+  description: '철도 승무원 스케줄링 도메인 지식. 도시철도(지하철), 고속철도(KTX), 일반철도, 화물 등 하위 도메인을 포함.
 
+    '
   detection_keywords:
-    - "철도"
-    - "열차"
-    - train
-    - railway
-    - rail
-    - "역"
-    - station
-    - "노선"
-    - line
-    - DIA
-    - "기관사"
-    - "승무원"
-
+  - 철도
+  - 열차
+  - train
+  - railway
+  - rail
+  - 역
+  - station
+  - 노선
+  - line
+  - DIA
+  - 기관사
+  - 승무원
   sub_domains:
     urban_metro:
-      name_ko: "도시철도/지하철"
-      keywords: ["지하철", metro, "도시철도", "경전철", light_rail]
+      name_ko: 도시철도/지하철
+      keywords:
+      - 지하철
+      - metro
+      - 도시철도
+      - 경전철
+      - light_rail
     high_speed:
-      name_ko: "고속철도"
-      keywords: [KTX, "고속", HSR, SRT]
+      name_ko: 고속철도
+      keywords:
+      - KTX
+      - 고속
+      - HSR
+      - SRT
     conventional:
-      name_ko: "일반철도"
-      keywords: ["무궁화", ITX, "새마을", "일반"]
+      name_ko: 일반철도
+      keywords:
+      - 무궁화
+      - ITX
+      - 새마을
+      - 일반
     freight:
-      name_ko: "화물"
-      keywords: ["화물", freight, cargo]
-
+      name_ko: 화물
+      keywords:
+      - 화물
+      - freight
+      - cargo
   problem_variants:
     duty_generation:
-      - single_line_bidirectional
-      - single_line_unidirectional
-      - multi_line
-      - circular_line
+    - single_line_bidirectional
+    - single_line_unidirectional
+    - multi_line
+    - circular_line
     roster_assignment:
-      - cyclic
-      - individual
-
+    - cyclic
+    - individual
   data_columns:
     trips:
       source_file: timetable_rows.csv
       fields:
-        - { name: trip_id,        type: string,  description: "운행 고유 ID" }
-        - { name: departure_time, type: time,    description: "출발 시각 (분)" }
-        - { name: arrival_time,   type: time,    description: "도착 시각 (분)" }
-        - { name: duration,       type: integer, description: "운행 소요시간 (분)" }
-        - { name: direction,      type: string,  description: "상행/하행" }
-        - { name: start_station,  type: string,  description: "출발역" }
-        - { name: end_station,    type: string,  description: "도착역" }
-      note: "deadhead(공차회송) 시간은 스케줄 데이터에서 계산해야 함"
+      - name: trip_id
+        type: string
+        description: 운행 고유 ID
+      - name: departure_time
+        type: time
+        description: 출발 시각 (분)
+      - name: arrival_time
+        type: time
+        description: 도착 시각 (분)
+      - name: duration
+        type: integer
+        description: 운행 소요시간 (분)
+      - name: direction
+        type: string
+        description: 상행/하행
+      - name: start_station
+        type: string
+        description: 출발역
+      - name: end_station
+        type: string
+        description: 도착역
+      note: deadhead(공차회송) 시간은 스케줄 데이터에서 계산해야 함
+problem_variants:
+  duty_generation:
+    name_ko: 사업(근무) 생성
+    description: 트립을 승무원 근무에 배정하여 최소 근무 수를 결정
+    typical_objectives:
+    - minimize_duties
+    - minimize_duties_with_penalties
+    - maximize_efficiency
+  roster_assignment:
+    name_ko: 교번표 배정
+    description: 생성된 근무를 승무원에게 배정
+    typical_objectives:
+    - balance_workload
+stages:
+  task_generation:
+    name_ko: 사업 생성
+    typical_objectives:
+    - minimize_duties
+    - minimize_duties_with_penalties
+    - maximize_efficiency
+    - balance_workload

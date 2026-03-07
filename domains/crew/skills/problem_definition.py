@@ -1074,7 +1074,9 @@ class ProblemDefinitionSkill:
                 for cname, cdata in confirmed.items():
                     name_ko = cdata.get("name_ko", cname)
                     values_str = self._format_values(cdata.get("values", {}))
-                    lines.append(f"- **{name_ko}** [{cdata.get('type','')}]: {values_str}")
+                    changeable = dk.is_category_changeable(cname) if dk else False
+                    tag = " [변경가능]" if changeable else ""
+                    lines.append(f"- **{name_ko}** [{cdata.get('type','')}]: {values_str}{tag}")
                 lines.append("")
 
             if partial:
@@ -1082,7 +1084,9 @@ class ProblemDefinitionSkill:
                 for cname, cdata in partial.items():
                     name_ko = cdata.get("name_ko", cname)
                     values_str = self._format_values(cdata.get("values", {}))
-                    lines.append(f"- **{name_ko}** [{cdata.get('type','')}]: {values_str}")
+                    changeable = dk.is_category_changeable(cname) if dk else False
+                    tag = " [변경가능]" if changeable else ""
+                    lines.append(f"- **{name_ko}** [{cdata.get('type','')}]: {values_str}{tag}")
                 lines.append("")
 
             if needs_input:
@@ -1117,9 +1121,18 @@ class ProblemDefinitionSkill:
             for cname, cdata in soft.items():
                 name_ko = cdata.get("name_ko", cname)
                 weight = cdata.get("weight", 0)
-                lines.append(f"- **{name_ko}**: {cdata.get('description','')} (가중치: {weight})")
+                changeable = dk.is_category_changeable(cname) if dk else False
+                tag = " [변경가능]" if changeable else ""
+                lines.append(f"- **{name_ko}**: {cdata.get('description','')} (가중치: {weight}){tag}")
             lines.append("")
 
+        # ── 카테고리 변경 안내 ──
+        if hard or soft:
+            lines.append("---")
+            lines.append("💡 **제약조건 카테고리 변경:**")
+            lines.append("- [변경가능] 표시된 제약은 Hard↔Soft 변경이 가능합니다.")
+            lines.append("- 예시: mandatory_break soft로 변경 또는 max_total_stay_time hard로 변경")
+            lines.append("")
         # 4. 파라미터 요약
         params = proposal.get("parameters", {})
         if params:
@@ -1209,6 +1222,8 @@ class ProblemDefinitionSkill:
                     "- 목적함수를 [목적함수명]으로 변경\n"
                     "- [파라미터명] = [값]\n"
                     "- [제약조건명] 제거\n"
+                    "- [제약조건명] soft로 변경 (Hard→Soft)\n"
+                    "- [제약조건명] hard로 변경 (Soft→Hard)\n"
                 ),
                 "data": {"agent_status": "modification_pending"},
                 "options": [],
@@ -1232,6 +1247,211 @@ class ProblemDefinitionSkill:
                     {"label": "분석 시작", "action": "send", "message": "분석 시작해줘"},
                 ],
             }
+
+        # ── 목적함수 변경 ──
+        import re as _re
+        obj_pattern = _re.compile(
+            r"목적함수[를을]?\s*(.*?)(?:로|으로)\s*변경|"
+            r"objective\s+(?:to\s+)?(\w+)",
+            _re.IGNORECASE
+        )
+        obj_match = obj_pattern.search(message)
+        if obj_match and state.problem_definition:
+            requested = (obj_match.group(1) or obj_match.group(2) or "").strip()
+
+            # dk에서 objectives 로드
+            dk = self._load_domain(state)
+            import yaml as _yaml
+            _constraints_path = "knowledge/domains/railway/constraints.yaml"
+            try:
+                with open(_constraints_path, encoding="utf-8") as _f:
+                    _cdata = _yaml.safe_load(_f)
+                objectives_map = _cdata.get("objectives", {})
+            except Exception:
+                objectives_map = {}
+
+            # 매칭: 이름 또는 description_ko에서 검색
+            matched_obj = None
+            for oname, odata in objectives_map.items():
+                desc_ko = odata.get("description_ko", "")
+                if (requested in oname or requested in desc_ko or
+                    oname in requested or desc_ko in requested):
+                    matched_obj = (oname, odata)
+                    break
+
+            if matched_obj:
+                oname, odata = matched_obj
+                old_obj = state.problem_definition.get("objective", {})
+                old_desc = old_obj.get("description", "알 수 없음")
+
+                # 목적함수 업데이트
+                state.problem_definition["objective"] = {
+                    "type": odata["type"],
+                    "target": oname,
+                    "description": odata["description"],
+                    "description_ko": odata.get("description_ko", odata["description"]),
+                    "expression": odata.get("expression", ""),
+                    "alternatives": [
+                        {"target": k, "description": v.get("description_ko", v["description"])}
+                        for k, v in objectives_map.items() if k != oname
+                    ],
+                }
+
+                # ── 연동: promote_to_hard / recommended_soft 자동 조정 ──
+                changes = []
+                promote_list = odata.get("promote_to_hard", [])
+                for cname in promote_list:
+                    if cname in state.problem_definition.get("soft_constraints", {}):
+                        moved = state.problem_definition["soft_constraints"].pop(cname)
+                        if "hard_constraints" not in state.problem_definition:
+                            state.problem_definition["hard_constraints"] = {}
+                        state.problem_definition["hard_constraints"][cname] = moved
+                        changes.append(f"  - **{cname}**: Soft → Hard (목적함수 연동)")
+                        if dk:
+                            dk.move_constraint(cname, "hard", force=True)
+
+                save_session_state(project_id, state)
+
+                change_text = ""
+                if changes:
+                    change_text = "\n\n**연동 변경:**\n" + "\n".join(changes)
+
+                return {
+                    "type": "problem_definition",
+                    "text": (
+                        f"✅ 목적함수를 변경했습니다.\n\n"
+                        f"- 이전: {old_desc}\n"
+                        f"- 변경: **{odata.get('description_ko', odata['description'])}**\n"
+                        f"- 수식: {odata.get('expression', '')}"
+                        f"{change_text}\n\n"
+                        f"**확인**을 입력하면 문제 정의가 확정됩니다."
+                    ),
+                    "data": {
+                        "proposal": state.problem_definition,
+                        "agent_status": "objective_modified",
+                    },
+                    "options": [
+                        {"label": "확인", "action": "send", "message": "확인"},
+                        {"label": "추가 수정", "action": "send", "message": "수정"},
+                    ],
+                }
+            else:
+                # 매칭 실패: 사용 가능한 목적함수 목록 표시
+                obj_list = "\n".join([
+                    f"- {k}: {v.get('description_ko', v['description'])}"
+                    for k, v in objectives_map.items()
+                ])
+                return {
+                    "type": "problem_definition",
+                    "text": (
+                        f"'{requested}'에 해당하는 목적함수를 찾을 수 없습니다.\n\n"
+                        f"**사용 가능한 목적함수:**\n{obj_list}\n\n"
+                        f"위 이름으로 다시 입력해주세요."
+                    ),
+                    "data": {"agent_status": "objective_change_failed"},
+                    "options": [
+                        {"label": k, "action": "send", "message": f"목적함수를 {v.get('description_ko', k)}로 변경"}
+                        for k, v in list(objectives_map.items())[:4]
+                    ],
+                }
+
+
+        # ── 제약조건 카테고리 변경 (hard↔soft) ──
+        category_pattern = re.compile(
+            r"(\w+)\s+(?:를\s*|을\s*)?(?:로\s*)?(hard|soft)(?:로)?(?:\s*변경|\s*전환|\s*바꿔|\s*바꾸)",
+            re.IGNORECASE
+        )
+        cat_match = category_pattern.search(message)
+        if not cat_match:
+            # 영어 패턴: "change max_total_stay_time to hard"
+            cat_pattern_en = re.compile(
+                r"(?:change|move|switch|set)\s+(\w+)\s+(?:to\s+)?(hard|soft)",
+                re.IGNORECASE
+            )
+            cat_match = cat_pattern_en.search(message)
+
+        if cat_match and state.problem_definition:
+            cname = cat_match.group(1)
+            to_cat = cat_match.group(2).lower()
+
+            # dk 로드
+            dk = self._load_domain(state)
+
+            # pending_category_change가 있으면 사용자가 경고에 확인한 것
+            pending = getattr(state, '_pending_category_change', None)
+            if pending and pending.get("constraint") == cname and pending.get("to") == to_cat:
+                # 사용자가 이전 경고에 대해 다시 같은 명령 → force
+                force = True
+                state._pending_category_change = None
+            else:
+                force = False
+
+            result = dk.move_constraint(cname, to_cat, force=force)
+
+            if result["success"]:
+                # problem_definition의 hard/soft 딕셔너리도 업데이트
+                from_cat = "soft" if to_cat == "hard" else "hard"
+                from_key = f"{from_cat}_constraints"
+                to_key = f"{to_cat}_constraints"
+
+                if cname in state.problem_definition.get(from_key, {}):
+                    moved_data = state.problem_definition[from_key].pop(cname)
+                    if to_key not in state.problem_definition:
+                        state.problem_definition[to_key] = {}
+                    state.problem_definition[to_key][cname] = moved_data
+
+                save_session_state(project_id, state)
+
+                name_ko = dk.get_constraint(cname)
+                if name_ko and isinstance(name_ko, dict):
+                    name_ko = name_ko.get("description", cname)
+                else:
+                    name_ko = cname
+
+                return {
+                    "type": "problem_definition",
+                    "text": (
+                        f"✅ **{name_ko}** 제약을 **{to_cat.upper()}**로 변경했습니다.\n\n"
+                        f"**확인**을 입력하면 문제 정의가 확정됩니다."
+                    ),
+                    "data": {
+                        "proposal": state.problem_definition,
+                        "agent_status": "category_modified",
+                    },
+                    "options": [
+                        {"label": "확인", "action": "send", "message": "확인"},
+                        {"label": "추가 수정", "action": "send", "message": "수정"},
+                    ],
+                }
+
+            elif result["needs_confirm"]:
+                # 경고 표시, 다시 같은 명령을 보내면 force 적용
+                state._pending_category_change = {"constraint": cname, "to": to_cat}
+                save_session_state(project_id, state)
+
+                return {
+                    "type": "problem_definition",
+                    "text": (
+                        f"{result['warning']}\n\n"
+                        f"변경을 확정하려면 동일한 명령을 다시 입력하세요:\n"
+                        f"{cname} {to_cat}로 변경"
+                    ),
+                    "data": {"agent_status": "category_change_pending"},
+                    "options": [
+                        {"label": f"{cname} {to_cat}로 변경", "action": "send", "message": f"{cname} {to_cat}로 변경"},
+                        {"label": "취소", "action": "send", "message": "취소"},
+                    ],
+                }
+
+            else:
+                return {
+                    "type": "problem_definition",
+                    "text": f"❌ {result['warning']}",
+                    "data": {"agent_status": "category_change_failed"},
+                    "options": [
+                        {"label": "확인", "action": "send", "message": "확인"},
+                    ],
+                }
 
         # 파라미터 수정 (key = value 패턴)
         param_pattern = re.compile(r"(\w+)\s*[=:：]\s*(\d+(?:\.\d+)?)")

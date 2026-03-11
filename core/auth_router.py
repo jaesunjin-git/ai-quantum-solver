@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import logging
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from core.database import get_db
+from core.rate_limit import limiter
 from core.models import UserDB
 from core.auth import (
     hash_password, verify_password,
@@ -76,7 +77,8 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
 
 # ── 로그인 ────────────────────────────────────────────────
 @router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(UserDB).filter(UserDB.username == body.username).first()
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")

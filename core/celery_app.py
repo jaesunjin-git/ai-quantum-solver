@@ -20,5 +20,6 @@ celery_app.conf.update(
 
 # 3. 태스크 모듈 등록 (워커가 찾을 파일 위치)
 celery_app.conf.imports = [
-    "engine.hybrid_orchestrator" 
+    "engine.hybrid_orchestrator",
+    "engine.tasks",
 ]

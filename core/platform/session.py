@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import asyncio
-from collections import deque
+import time as _time_mod
+from collections import deque, OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -335,7 +337,55 @@ class CrewSession:
         self.lock = asyncio.Lock()
 
 
-_sessions: Dict[str, CrewSession] = {}
+# ── LRU + TTL 세션 캐시 ──────────────────────────────────
+
+_MAX_SESSIONS = int(os.environ.get("SESSION_CACHE_MAX", "100"))
+_SESSION_TTL_SEC = int(os.environ.get("SESSION_TTL_SEC", "3600"))
+
+
+class _SessionCache:
+    """LRU + TTL 세션 캐시. 최대 _MAX_SESSIONS개, TTL 초과 시 DB 저장 후 제거."""
+
+    def __init__(self, max_size: int = _MAX_SESSIONS, ttl: int = _SESSION_TTL_SEC):
+        self._cache: OrderedDict[str, tuple[CrewSession, float]] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl
+
+    def get(self, key: str) -> Optional[CrewSession]:
+        if key in self._cache:
+            session, ts = self._cache[key]
+            if _time_mod.time() - ts > self._ttl:
+                # TTL 만료 → DB에 저장 후 제거
+                save_session_state(key, session.state)
+                del self._cache[key]
+                logger.info(f"[{key}] Session evicted (TTL expired)")
+                return None
+            # LRU: 최근 사용으로 이동
+            self._cache.move_to_end(key)
+            self._cache[key] = (session, _time_mod.time())
+            return session
+        return None
+
+    def put(self, key: str, session: CrewSession):
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            self._cache[key] = (session, _time_mod.time())
+            return
+        if len(self._cache) >= self._max_size:
+            # 가장 오래된 항목 제거 (DB에 저장 후)
+            old_key, (old_session, _) = self._cache.popitem(last=False)
+            save_session_state(old_key, old_session.state)
+            logger.info(f"[{old_key}] Session evicted (LRU, cache full: {self._max_size})")
+        self._cache[key] = (session, _time_mod.time())
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+_sessions = _SessionCache()
 
 
 def _restore_history_from_db(project_id: str, session: CrewSession):
@@ -356,7 +406,6 @@ def _restore_history_from_db(project_id: str, session: CrewSession):
             rows.reverse()  # 시간순 정렬
             for row in rows:
                 entry = {"role": row.role, "content": row.message_text or ""}
-                # Action 이력 추출: assistant 응답에서 수행된 작업 기록
                 if row.role == "assistant" and row.card_json:
                     try:
                         card = json.loads(row.card_json) if isinstance(row.card_json, str) else row.card_json
@@ -376,15 +425,18 @@ def _restore_history_from_db(project_id: str, session: CrewSession):
 
 
 def get_session(project_id: str) -> CrewSession:
-    if project_id not in _sessions:
-        session = CrewSession()
-        # DB에서 이전 상태 복원 시도
-        saved_state = load_session_state(project_id)
-        if saved_state:
-            session.state = saved_state
-            logger.info(f"[{project_id}] Session state restored from DB")
-        # DB에서 대화 히스토리 복원
-        _restore_history_from_db(project_id, session)
-        _sessions[project_id] = session
-    return _sessions[project_id]
+    cached = _sessions.get(project_id)
+    if cached is not None:
+        return cached
+
+    session = CrewSession()
+    # DB에서 이전 상태 복원 시도
+    saved_state = load_session_state(project_id)
+    if saved_state:
+        session.state = saved_state
+        logger.info(f"[{project_id}] Session state restored from DB")
+    # DB에서 대화 히스토리 복원
+    _restore_history_from_db(project_id, session)
+    _sessions.put(project_id, session)
+    return session
 

@@ -79,16 +79,20 @@ class ChatHistoryDB(Base):
 # 4. [Job] 실행 작업
 class JobDB(Base):
     __tablename__ = "jobs"
-    __table_args__ = {"schema": "job"} # 👈 job 스키마
+    __table_args__ = {"schema": "job"}
 
     id = Column(Integer, primary_key=True, index=True)
-    # ⚠️ 중요: core 스키마 참조
     project_id = Column(Integer, ForeignKey("core.projects.id"))
-    
-    status = Column(String, default="PENDING")
+
+    status = Column(String, default="PENDING")  # PENDING, RUNNING, COMPLETE, FAILED
     backend = Column(String)
+    solver_id = Column(String, nullable=True)
+    solver_name = Column(String, nullable=True)
+    progress = Column(String, nullable=True)     # 진행 상태 메시지
+    error = Column(Text, nullable=True)
     result_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
 
     project = relationship("ProjectDB", back_populates="jobs")
@@ -157,10 +161,31 @@ class SolverSettingDB(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     solver_id = Column(String, unique=True, nullable=False, index=True)
     enabled = Column(Boolean, default=False)
-    api_key = Column(String, nullable=True)
+    api_key = Column(String, nullable=True)               # deprecated: 평문 (하위 호환)
+    encrypted_api_key = Column(String, nullable=True)      # Fernet 암호화된 API Key
     time_limit_sec = Column(Integer, nullable=True)  # NULL이면 YAML max_time_seconds 사용
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     updated_by = Column(String, nullable=True)
+
+    def get_api_key(self) -> str | None:
+        """복호화된 API Key 반환 (encrypted 우선, 평문 fallback)."""
+        if self.encrypted_api_key:
+            from core.crypto import decrypt
+            try:
+                return decrypt(self.encrypted_api_key)
+            except Exception:
+                pass
+        return self.api_key
+
+    def set_api_key(self, plaintext: str | None):
+        """API Key를 암호화하여 저장. 평문 컬럼은 비움."""
+        if plaintext:
+            from core.crypto import encrypt
+            self.encrypted_api_key = encrypt(plaintext)
+            self.api_key = None  # 평문 제거
+        else:
+            self.encrypted_api_key = None
+            self.api_key = None
 
 
 # ============================================================

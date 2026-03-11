@@ -23,11 +23,12 @@ import logging
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from core.database import get_db
+from core.rate_limit import limiter
 from engine.validation.registry import get_registry
 from core.models import ChatHistoryDB
 from core.schemas import ChatRequest, ChatResponse
@@ -87,7 +88,9 @@ from core.auth import get_current_user
 from core.models import UserDB
 
 @router.post("/chat/message", response_model=ChatResponse)
+@limiter.limit("30/minute")
 async def chat_endpoint(
+    request: Request,
     payload: ChatRequest,
     current_user: UserDB = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -140,7 +143,9 @@ async def chat_endpoint(
 # 2) 파일 업로드
 # ============================================================
 @router.post("/upload")
+@limiter.limit("10/minute")
 async def upload_files(
+    request: Request,
     project_id: str = Form(...),
     files: List[UploadFile] = File(...),
     current_user: UserDB = Depends(get_current_user),
@@ -625,15 +630,17 @@ _pipeline = SolverPipeline()
 
 
 @router.post('/solve')
+@limiter.limit("5/minute")
 async def solve_optimization(
-    request: dict,
+    request: Request,
     current_user: UserDB = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    project_id = request.get('project_id')
-    solver_id = request.get('solver_id')
-    solver_name = request.get('solver_name', '')
-    math_model = request.get('math_model')
+    body = await request.json()
+    project_id = body.get('project_id')
+    solver_id = body.get('solver_id')
+    solver_name = body.get('solver_name', '')
+    math_model = body.get('math_model')
     # 우선순위: DB 설정 > YAML max_time_seconds > fallback(120s)
     time_limit = get_solver_time_limit(solver_id, db)
 

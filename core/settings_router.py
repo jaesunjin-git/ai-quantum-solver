@@ -64,7 +64,7 @@ def get_solver_settings(
             category=solver.get("category", ""),
             description=solver.get("description", ""),
             enabled=db_row.enabled if db_row else False,
-            has_api_key=bool(db_row.api_key) if db_row else False,
+            has_api_key=bool(db_row.encrypted_api_key or db_row.api_key) if db_row else False,
             time_limit_sec=db_row.time_limit_sec if db_row else None,
             time_limit_default=int(yaml_default) if yaml_default else None,
         ))
@@ -87,17 +87,18 @@ def update_solver_settings(
         if row:
             row.enabled = item.enabled
             if item.api_key is not None:
-                row.api_key = item.api_key
+                row.set_api_key(item.api_key)
             row.time_limit_sec = item.time_limit_sec
             row.updated_by = current_user.username
         else:
             row = models.SolverSettingDB(
                 solver_id=item.solver_id,
                 enabled=item.enabled,
-                api_key=item.api_key,
                 time_limit_sec=item.time_limit_sec,
                 updated_by=current_user.username,
             )
+            if item.api_key is not None:
+                row.set_api_key(item.api_key)
             db.add(row)
 
     # 솔버 설정 변경 시 모든 세션의 캐시 무효화

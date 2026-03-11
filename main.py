@@ -29,8 +29,12 @@ from core.version.version_router import router as version_router
 from core.project_router import router as project_router
 from core.auth_router import router as auth_router
 from engine.validation.router import router as validation_router
+from core.job_router import router as job_router
 from engine.validation.registry import get_registry
 from engine.validation.generic import register_all as register_generic_validators
+from core.rate_limit import limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
 
 import logging
 
@@ -42,13 +46,17 @@ logging.basicConfig(
 # 1. FastAPI 앱 선언
 app = FastAPI()
 
+# 1-1. Rate Limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # 2. CORS 미들웨어 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # 3. 라우터 등록
@@ -58,6 +66,7 @@ app.include_router(project_router)       # /api/projects
 app.include_router(settings_router)      # /api/settings
 app.include_router(auth_router)          # /api/auth/*
 app.include_router(validation_router)    # /api/validation/*
+app.include_router(job_router)           # /api/jobs/*
 
 def _migrate_solver_settings(db):
     """기존 core.solver_settings 테이블에 새 컬럼을 안전하게 추가"""
@@ -65,10 +74,47 @@ def _migrate_solver_settings(db):
         db.execute(text(
             "ALTER TABLE core.solver_settings ADD COLUMN IF NOT EXISTS time_limit_sec INTEGER"
         ))
+        db.execute(text(
+            "ALTER TABLE core.solver_settings ADD COLUMN IF NOT EXISTS encrypted_api_key TEXT"
+        ))
         db.commit()
         print("Solver settings migration check completed.")
     except Exception:
         db.rollback()
+
+    # 기존 평문 api_key → 암호화 마이그레이션
+    try:
+        rows = db.query(models.SolverSettingDB).filter(
+            models.SolverSettingDB.api_key.isnot(None),
+            models.SolverSettingDB.encrypted_api_key.is_(None),
+        ).all()
+        if rows:
+            for row in rows:
+                row.set_api_key(row.api_key)
+            db.commit()
+            print(f"Migrated {len(rows)} plaintext API keys to encrypted.")
+    except Exception as e:
+        db.rollback()
+        print(f"API key migration warning: {e}")
+
+
+def _migrate_jobs(db):
+    """job.jobs 테이블에 새 컬럼 추가"""
+    new_columns = {
+        "solver_id": "VARCHAR",
+        "solver_name": "VARCHAR",
+        "progress": "VARCHAR",
+        "error": "TEXT",
+        "started_at": "TIMESTAMP",
+    }
+    for col_name, col_type in new_columns.items():
+        try:
+            db.execute(text(
+                f"ALTER TABLE job.jobs ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+            ))
+        except Exception:
+            pass
+    db.commit()
 
 
 def _migrate_session_states(db):
@@ -121,6 +167,7 @@ def startup():
     try:
         _migrate_session_states(db2)
         _migrate_solver_settings(db2)
+        _migrate_jobs(db2)
     except Exception as e:
         print(f"Migration warning: {e}")
         db2.rollback()

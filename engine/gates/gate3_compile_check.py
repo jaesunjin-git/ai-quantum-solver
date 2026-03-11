@@ -93,6 +93,16 @@ def run(compile_result: Dict,
         stats["failed_constraints"] = failed_constraints
         stats["skipped_soft"] = skipped_soft
 
+        # soft 제약 스킵 경고 (NL 등 soft 미지원 솔버)
+        if skipped_soft > 0 and soft_defined > 0:
+            skip_ratio = skipped_soft / soft_defined
+            if skip_ratio > 0.5:
+                warnings.append(
+                    f"soft 제약 {skipped_soft}/{soft_defined}개 스킵됨 — "
+                    f"솔버가 soft constraint를 지원하지 않아 탐색 방향이 "
+                    f"제한될 수 있습니다 (penalty 변환 확인 필요)"
+                )
+
         # hard 제약 적용률
         hard_applied = hard_defined - failed_constraints
         if hard_defined > 0:

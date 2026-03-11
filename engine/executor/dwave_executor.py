@@ -204,47 +204,78 @@ class DWaveExecutor(BaseExecutor):
             elapsed = time.time() - start
 
             # NL 모델에서 솔루션 추출
-            # dwave.optimization.Model의 결과는 model.states를 통해 접근
             solution = {}
             obj_val = None
+            num_states = 0
+            is_feasible = False
 
-            if nl_model.num_feasible() > 0:
-                status = "FEASIBLE"
-                success = True
+            with nl_model.lock():
+                num_states = nl_model.states.size()
 
-                # 목적함수 값 추출
-                try:
-                    obj_val = float(nl_model.objective.state(0))
-                except Exception:
-                    pass
+                # best state 선택: feasible 우선, 없으면 best-effort (state 0)
+                best_idx = None
+                is_feasible = False
 
-                # 변수 값 추출
-                for vid, var_data in var_map.items():
-                    if isinstance(var_data, dict):
-                        solution[vid] = {}
-                        for key, entry in var_data.items():
-                            if isinstance(entry, tuple):
-                                arr, idx = entry
+                if num_states > 0:
+                    # feasible state 검색
+                    for si in range(num_states):
+                        try:
+                            if nl_model.feasible(si):
+                                best_idx = si
+                                is_feasible = True
+                                break
+                        except Exception:
+                            pass
+
+                    # feasible 없으면 state 0 (best-effort)
+                    if best_idx is None:
+                        best_idx = 0
+
+                if best_idx is not None:
+                    if is_feasible:
+                        status = "FEASIBLE"
+                        success = True
+                    else:
+                        status = "INFEASIBLE_BEST"
+                        success = True  # 해는 있으므로 결과 전달
+
+                    # 목적함수 값 추출
+                    try:
+                        obj_val = float(nl_model.objective.state(best_idx))
+                    except Exception:
+                        pass
+
+                    # 변수 값 추출 (v2: NL 심볼 직접 저장 방식)
+                    for vid, var_data in var_map.items():
+                        if isinstance(var_data, dict):
+                            solution[vid] = {}
+                            for key, entry in var_data.items():
                                 try:
-                                    val = float(arr.state(0, idx))
+                                    if isinstance(entry, tuple):
+                                        arr, idx = entry
+                                        val = float(arr.state(best_idx, idx))
+                                    else:
+                                        val = float(entry.state(best_idx))
                                     if val != 0:
                                         solution[vid][str(key)] = val
                                 except Exception:
                                     pass
-                    else:
-                        # 스칼라 변수
-                        try:
-                            val = float(var_data.state(0, 0))
-                            solution[vid] = val
-                        except Exception:
-                            solution[vid] = 0
-            else:
-                status = "INFEASIBLE"
-                success = False
+                        else:
+                            try:
+                                if isinstance(var_data, tuple):
+                                    val = float(var_data[0].state(best_idx, var_data[1]))
+                                else:
+                                    val = float(var_data.state(best_idx))
+                                solution[vid] = val
+                            except Exception:
+                                solution[vid] = 0
+                else:
+                    status = "INFEASIBLE"
+                    success = False
 
             logger.info(
                 f"NL: status={status}, obj={obj_val}, time={elapsed:.2f}s, "
-                f"feasible={nl_model.num_feasible()}"
+                f"states={num_states}, feasible={is_feasible}"
             )
 
             return ExecuteResult(
@@ -255,8 +286,8 @@ class DWaveExecutor(BaseExecutor):
                 solution=solution,
                 execution_time_sec=round(elapsed, 3),
                 solver_info={
-                    "num_feasible": nl_model.num_feasible(),
-                    "num_states": len(nl_model.states) if hasattr(nl_model, 'states') else 0,
+                    "num_feasible": 1 if success else 0,
+                    "num_states": num_states,
                 },
                 raw_response=nl_model,
             )

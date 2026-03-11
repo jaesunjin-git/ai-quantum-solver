@@ -16,7 +16,7 @@ export function KPIDashboard({
   data: ResultData;
   interpreted?: InterpretedResult;
 }) {
-  const isFeasible = data.status === 'FEASIBLE' || data.status === 'OPTIMAL';
+  const isFeasible = data.status === 'FEASIBLE' || data.status === 'OPTIMAL' || data.status === 'INFEASIBLE_BEST';
 
   if (!interpreted || !interpreted.duties?.length) {
     // fallback: 기존 실행 결과

@@ -50,7 +50,7 @@ export function DutyScheduleTab({
       </div>
 
       {/* 듀티 목록 */}
-      <div className="space-y-2 max-h-[calc(100vh-320px)] overflow-y-auto custom-scrollbar">
+      <div className="space-y-2">
         {sortedDuties.map(duty => {
           const isExpanded = expandedDuty === duty.duty_id;
           const hasViolation = duty.violations && duty.violations.length > 0;
@@ -102,7 +102,9 @@ export function DutyScheduleTab({
                       ))}
                     </div>
                   )}
-                  {/* 트립 타임라인 */}
+                  {/* 시각적 타임라인 바 */}
+                  <DutyTimelineBar duty={duty} />
+                  {/* 트립 목록 */}
                   <div className="mt-2 space-y-1">
                     {duty.trips.map((trip, i) => (
                       <div key={trip.trip_id}
@@ -130,6 +132,76 @@ export function DutyScheduleTab({
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+/** 듀티 타임라인 시각화 바 — 자정(24:00) 넘는 야간 근무 지원 */
+function DutyTimelineBar({ duty }: { duty: DutyDetail }) {
+  if (!duty.trips.length) return null;
+
+  const startMin = duty.start_time_min;
+  const endMin = duty.end_time_min;
+  const crossesMidnight = endMin > 1440;
+
+  // 시간축 범위: 시작 1시간 전 ~ 종료 1시간 후 (최소 4시간 폭)
+  const axisStart = Math.max(0, Math.floor(startMin / 60) * 60 - 60);
+  const axisEnd = Math.min(crossesMidnight ? 1800 : 1440, Math.ceil(endMin / 60) * 60 + 60);
+  const axisRange = axisEnd - axisStart || 1;
+
+  const pct = (min: number) => ((min - axisStart) / axisRange) * 100;
+
+  // 시간 눈금 생성
+  const ticks: number[] = [];
+  for (let h = Math.ceil(axisStart / 60); h * 60 <= axisEnd; h++) {
+    ticks.push(h * 60);
+  }
+
+  const fmtHour = (m: number) => {
+    const h = Math.floor(m / 60);
+    return h < 24 ? `${h}:00` : `${h - 24}:00+1`;
+  };
+
+  return (
+    <div className="mt-2 mb-1">
+      <div className="relative h-6 bg-slate-800/80 rounded-lg overflow-hidden">
+        {/* 자정 마커 */}
+        {crossesMidnight && axisStart < 1440 && axisEnd > 1440 && (
+          <div
+            className="absolute top-0 bottom-0 w-px bg-red-500/40 z-10"
+            style={{ left: `${pct(1440)}%` }}
+          >
+            <span className="absolute -top-0.5 -translate-x-1/2 text-[8px] text-red-400">00:00</span>
+          </div>
+        )}
+        {/* 트립 블록 */}
+        {duty.trips.map((trip, i) => {
+          const left = pct(trip.dep_time);
+          const width = Math.max(pct(trip.arr_time) - left, 0.5);
+          return (
+            <div
+              key={trip.trip_id}
+              className={`absolute top-1 bottom-1 rounded-sm ${
+                trip.direction === 'forward' ? 'bg-blue-500/60' : 'bg-amber-500/60'
+              }`}
+              style={{ left: `${left}%`, width: `${width}%` }}
+              title={`T${trip.trip_id}: ${trip.dep_hhmm}→${trip.arr_hhmm} (${trip.duration}분)`}
+            />
+          );
+        })}
+      </div>
+      {/* 시간 눈금 */}
+      <div className="relative h-3">
+        {ticks.map(t => (
+          <span
+            key={t}
+            className="absolute text-[8px] text-slate-600 -translate-x-1/2"
+            style={{ left: `${pct(t)}%` }}
+          >
+            {fmtHour(t)}
+          </span>
+        ))}
       </div>
     </div>
   );

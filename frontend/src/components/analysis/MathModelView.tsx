@@ -1,15 +1,17 @@
 // src/components/analysis/MathModelView.tsx
-import { Activity, ChevronDown, ChevronUp, Download, FileText, Play } from 'lucide-react';
-import { useState } from 'react';
+import { Activity, ChevronDown, ChevronUp, Download, Edit3, FileText, Play, Save, X } from 'lucide-react';
+import { useState, useCallback } from 'react';
 import type { MathModelData } from './types';
 
 export function MathModelView({
   data,
   onAction,
+  onEvent,
   projectId,
 }: {
   data: MathModelData;
   onAction?: (type: string, message: string) => void;
+  onEvent?: (message: string, eventType: string, eventData: any) => void;
   projectId?: string;
 }) {
   const model = data.math_model || {};
@@ -18,6 +20,7 @@ export function MathModelView({
   const constraints = model.constraints || [];
   const objective = model.objective || {};
   const sets = model.sets || {};
+  const parameters = model.parameters || [];
 
   const varCount = meta.estimated_variable_count || variables.length || 0;
   const conCount = meta.estimated_constraint_count || constraints.length || 0;
@@ -25,7 +28,45 @@ export function MathModelView({
   const recSolvers = meta.recommended_solvers || [];
 
   const [showAllConstraints, setShowAllConstraints] = useState(false);
+  const [showParams, setShowParams] = useState(true);
+  const [editingParam, setEditingParam] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
   const CONSTRAINTS_PREVIEW = 8;
+
+  // 파라미터를 배열 또는 객체에서 통일된 리스트로 변환
+  const paramList: { id: string; value: any; type: string; source?: string; description?: string }[] =
+    Array.isArray(parameters)
+      ? parameters.map((p: any) => ({
+          id: p.id || p.name || '',
+          value: p.default_value ?? p.value ?? null,
+          type: p.type || 'scalar',
+          source: p.source_file || p.source || '',
+          description: p.description || '',
+        }))
+      : Object.entries(parameters).map(([k, v]: [string, any]) => ({
+          id: k,
+          value: typeof v === 'object' ? (v.default_value ?? v.value ?? null) : v,
+          type: typeof v === 'object' ? (v.type || 'scalar') : 'scalar',
+          source: typeof v === 'object' ? (v.source_file || v.source || '') : '',
+          description: typeof v === 'object' ? (v.description || '') : '',
+        }));
+
+  const scalarParams = paramList.filter(p => p.type === 'scalar' || p.type === 'number');
+  const indexedParams = paramList.filter(p => p.type !== 'scalar' && p.type !== 'number');
+
+  const handleParamEdit = useCallback((paramId: string) => {
+    const p = paramList.find(pp => pp.id === paramId);
+    setEditingParam(paramId);
+    setEditValue(p?.value?.toString() ?? '');
+  }, [paramList]);
+
+  const handleParamSave = useCallback(() => {
+    if (editingParam && onAction) {
+      onAction('send', `${editingParam} = ${editValue}`);
+      setEditingParam(null);
+      setEditValue('');
+    }
+  }, [editingParam, editValue, onAction]);
 
   return (
     <div className="h-full flex flex-col bg-slate-900 overflow-hidden animate-fade-in">
@@ -201,28 +242,132 @@ export function MathModelView({
           </div>
         )}
 
+        {/* Parameters */}
+        {paramList.length > 0 && (
+          <div className="bg-slate-800 rounded-xl p-4 space-y-2">
+            <button
+              onClick={() => setShowParams(!showParams)}
+              className="flex items-center justify-between w-full"
+            >
+              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                {'🔢 파라미터'}
+                <span className="text-[11px] text-slate-500 font-normal">{paramList.length}개</span>
+              </h3>
+              {showParams ? <ChevronUp size={14} className="text-slate-400" /> : <ChevronDown size={14} className="text-slate-400" />}
+            </button>
+            {showParams && (
+              <div className="space-y-3 mt-2">
+                {/* Scalar parameters */}
+                {scalarParams.length > 0 && (
+                  <div>
+                    <p className="text-[10px] text-emerald-400 font-semibold mb-1 uppercase tracking-wider">{'Scalar'}</p>
+                    <div className="space-y-0.5">
+                      {scalarParams.map(p => (
+                        <div key={p.id} className="flex items-center justify-between text-[11px] py-1 border-b border-slate-700/30 last:border-0 group">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-indigo-400 font-mono">{p.id}</span>
+                            {p.description && <span className="text-slate-500 truncate max-w-[140px]">{p.description}</span>}
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {editingParam === p.id ? (
+                              <>
+                                <input
+                                  type="text"
+                                  value={editValue}
+                                  onChange={e => setEditValue(e.target.value)}
+                                  onKeyDown={e => e.key === 'Enter' && handleParamSave()}
+                                  className="w-20 px-1.5 py-0.5 text-[11px] bg-slate-900 border border-indigo-500 rounded text-slate-200 focus:outline-none"
+                                  autoFocus
+                                />
+                                <button onClick={handleParamSave} className="text-emerald-400 hover:text-emerald-300"><Save size={12} /></button>
+                                <button onClick={() => setEditingParam(null)} className="text-slate-500 hover:text-slate-300"><X size={12} /></button>
+                              </>
+                            ) : (
+                              <>
+                                <span className={`font-mono ${p.value != null ? 'text-emerald-300' : 'text-red-400'}`}>
+                                  {p.value != null ? String(p.value) : '???'}
+                                </span>
+                                {p.source && (
+                                  <span className="text-[9px] text-slate-600 hidden group-hover:inline">
+                                    {String(p.source).replace('normalized/', '').slice(0, 20)}
+                                  </span>
+                                )}
+                                <button
+                                  onClick={() => handleParamEdit(p.id)}
+                                  className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-indigo-400 transition-opacity"
+                                  title="편집"
+                                >
+                                  <Edit3 size={11} />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Indexed parameters */}
+                {indexedParams.length > 0 && (
+                  <div>
+                    <p className="text-[10px] text-amber-400 font-semibold mb-1 uppercase tracking-wider">{'Indexed / Array'}</p>
+                    <div className="space-y-0.5">
+                      {indexedParams.map(p => (
+                        <div key={p.id} className="flex items-center justify-between text-[11px] py-1 border-b border-slate-700/30 last:border-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-indigo-400 font-mono">{p.id}</span>
+                            {p.description && <span className="text-slate-500 truncate max-w-[140px]">{p.description}</span>}
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-slate-500 bg-slate-900 px-1.5 py-0.5 rounded">{p.type}</span>
+                            {p.source && (
+                              <span className="text-[9px] text-slate-600">{String(p.source).replace('normalized/', '').slice(0, 25)}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Constraints */}
         {constraints.length > 0 && (
           <div className="bg-slate-800 rounded-xl p-4 space-y-2">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-white">🗣️ 제약 조건</h3>
-              <span className="text-[11px] text-slate-500">{constraints.length}개</span>
+              <h3 className="text-sm font-semibold text-white">{'🗣️ 제약 조건'}</h3>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] bg-red-500/15 text-red-400 px-1.5 py-0.5 rounded">
+                  Hard {constraints.filter((c: any) => (c.priority || c.category || c.type || 'hard') === 'hard').length}
+                </span>
+                <span className="text-[10px] bg-yellow-500/15 text-yellow-400 px-1.5 py-0.5 rounded">
+                  Soft {constraints.filter((c: any) => (c.priority || c.category || c.type || 'hard') !== 'hard').length}
+                </span>
+              </div>
             </div>
             <div className="space-y-2">
-              {(showAllConstraints ? constraints : constraints.slice(0, CONSTRAINTS_PREVIEW)).map((c: any, idx: number) => (
-                <div key={idx} className="bg-slate-900 rounded-lg p-2">
-                  <div className="flex justify-between items-center">
-                    <span className="text-[11px] font-mono text-amber-400">{c.name || c.id || `c${idx + 1}`}</span>
-                    <span className={`text-[11px] px-2 py-0.5 rounded ${c.category === 'hard' || c.type === 'hard' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
-                      {c.category || c.type || 'hard'}
-                    </span>
+              {(showAllConstraints ? constraints : constraints.slice(0, CONSTRAINTS_PREVIEW)).map((c: any, idx: number) => {
+                const cat = c.priority || c.category || c.type || 'hard';
+                const isHard = cat === 'hard';
+                return (
+                  <div key={idx} className="bg-slate-900 rounded-lg p-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[11px] font-mono text-amber-400">{c.name || c.id || `c${idx + 1}`}</span>
+                      <span className={`text-[11px] px-2 py-0.5 rounded ${isHard ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                        {isHard ? 'Hard' : 'Soft'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1">{c.description || ''}</p>
+                    {c.expression && (
+                      <code className="text-[11px] text-green-400 mt-1 block">{c.expression}</code>
+                    )}
                   </div>
-                  <p className="text-[11px] text-slate-400 mt-1">{c.description || ''}</p>
-                  {c.expression && (
-                    <code className="text-[11px] text-green-400 mt-1 block">{c.expression}</code>
-                  )}
-                </div>
-              ))}
+                );
+              })}
               {constraints.length > CONSTRAINTS_PREVIEW && (
                 <button
                   onClick={() => setShowAllConstraints(v => !v)}

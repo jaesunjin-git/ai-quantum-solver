@@ -18,6 +18,7 @@ interface StepCache {
 interface AnalysisContextType {
   analysisData: any;
   setAnalysisData: (data: any) => void;
+  restoreFromHistory: (cardDataList: any[]) => void;
   stepCache: StepCache;
   cacheCurrentStep: () => void;
   switchToStep: (step: StepId) => void;
@@ -29,6 +30,7 @@ interface AnalysisContextType {
 const AnalysisContext = createContext<AnalysisContextType>({
   analysisData: null,
   setAnalysisData: () => {},
+  restoreFromHistory: () => {},
   stepCache: {},
   cacheCurrentStep: () => {},
   switchToStep: () => {},
@@ -95,6 +97,35 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Bulk restore: history의 모든 card_data를 처리하여 completedSteps + stepCache 복원
+  const restoreFromHistory = useCallback((cardDataList: any[]) => {
+    const restoredSteps = new Set<StepId>();
+    const restoredCache: StepCache = {};
+    let lastData: any = null;
+
+    for (const data of cardDataList) {
+      if (!data || !data.view_mode) continue;
+      const mapped = viewModeToStepId(data.view_mode);
+      if (!mapped) continue;
+      const { stepId, isFileUpload } = mapped;
+      if (isFileUpload) {
+        if (!restoredCache.analysis) restoredCache.analysis = data;
+      } else {
+        restoredSteps.add(stepId);
+        restoredCache[stepId] = data;
+      }
+      lastData = data;
+    }
+
+    if (restoredSteps.size > 0) {
+      setCompletedSteps(restoredSteps);
+      setStepCache(restoredCache);
+    }
+    if (lastData) {
+      setAnalysisDataRaw(lastData);
+    }
+  }, []);
+
   const cacheCurrentStep = useCallback(() => {
     if (analysisData?.view_mode) {
       const mapped = viewModeToStepId(analysisData.view_mode);
@@ -111,7 +142,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
 
   return (
     <AnalysisContext.Provider value={{
-      analysisData, setAnalysisData, stepCache,
+      analysisData, setAnalysisData, restoreFromHistory, stepCache,
       cacheCurrentStep, switchToStep, completedSteps,
       stageValidation, setStageValidation,
     }}>

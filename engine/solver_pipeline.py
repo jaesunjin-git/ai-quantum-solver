@@ -82,6 +82,9 @@ class SolverPipeline:
                 f"DataBinder: sets={list(bound_data['set_sizes'].items())}, "
                 f"params={len(bound_data['parameters'])}"
             )
+            # F8: log parameter warnings from validation
+            for pw in bound_data.get("parameter_warnings", []):
+                logger.warning(f"ParamValidation: {pw}")
         except Exception as e:
             logger.error(f"DataBinding failed: {e}", exc_info=True)
             return PipelineResult(
@@ -179,6 +182,8 @@ class SolverPipeline:
                     },
                     "objective_parsed": True,
                     "warnings": compile_result.warnings or [],
+                    "parameter_sources": bound_data.get("parameter_sources", {}),
+                    "parameter_warnings": bound_data.get("parameter_warnings", []),
                 },
                 "model_stats": {
                     "total_variables": compile_result.variable_count,
@@ -245,7 +250,8 @@ class SolverPipeline:
         #  Phase 4: Build Summary 
         summary = self._build_summary(
             math_model, solver_id, solver_name,
-            compile_result, compile_time, execute_result
+            compile_result, compile_time, execute_result,
+            bound_data=bound_data,
         )
 
         return PipelineResult(
@@ -267,6 +273,7 @@ class SolverPipeline:
         compile_result: CompileResult,
         compile_time: float,
         execute_result: ExecuteResult,
+        bound_data: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """프론트엔드에 보낼 결과 요약 생성 (compile_summary 포함)"""
 
@@ -305,6 +312,8 @@ class SolverPipeline:
             "compile_time_sec": round(compile_time, 3),
             "warnings": warnings_list,
             "warning_count": len(warnings_list),
+            "parameter_sources": (bound_data or {}).get("parameter_sources", {}),
+            "parameter_warnings": (bound_data or {}).get("parameter_warnings", []),
         }
 
         # ── execute_summary 구조화 ──

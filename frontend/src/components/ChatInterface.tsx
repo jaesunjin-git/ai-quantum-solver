@@ -49,7 +49,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   triggerEvent,
   onTriggerEventComplete,
 }) => {
-  const { setAnalysisData, setStageValidation } = useAnalysis();
+  const { setAnalysisData, restoreFromHistory, setStageValidation } = useAnalysis();
 
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -118,13 +118,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             options: h.options || undefined,
           }));
           setMessages(restored);
-          if (setAnalysisData) {
-            for (let i = history.length - 1; i >= 0; i--) {
-              if (history[i].card_data) {
-                setAnalysisData(history[i].card_data);
-                break;
-              }
-            }
+          // 모든 history의 card_data를 순서대로 복원하여 completedSteps + stepCache 재구성
+          const allCardData = history
+            .filter((h: any) => h.card_data)
+            .map((h: any) => h.card_data);
+          if (allCardData.length > 0) {
+            restoreFromHistory(allCardData);
           }
         }
       } catch (e) {

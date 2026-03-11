@@ -175,12 +175,12 @@ class TestNLCompilerSoftConstraints:
         result = compiler.compile(model, {"sets": {"I": [0, 1, 2]}, "parameters": {}})
 
         assert result.success
-        # soft 제약은 경고로 기록되어야 함
-        assert any("Soft constraint" in w for w in result.warnings)
-        # constraint_info에 penalty_deferred로 기록
+        # constraint_info에 soft로 기록 (penalty 변환 성공 시 method="penalty")
         soft_info = [c for c in result.metadata["constraint_info"] if c["category"] == "soft"]
         assert len(soft_info) == 1
-        assert soft_info[0]["method"] == "penalty_deferred"
+        # expression이 있으므로 penalty로 변환되어야 함
+        assert soft_info[0]["method"] == "penalty"
+        assert soft_info[0]["count"] > 0
 
 
 class TestNLCompilerRegistration:

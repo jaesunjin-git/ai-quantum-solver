@@ -406,6 +406,23 @@ class DataBinder:
         return None
 
     @staticmethod
+    def _determine_source(param_def: dict, resolved_value) -> str:
+        """파라미터 값이 어디서 왔는지 결정 (F5 source tracking)."""
+        if resolved_value is None:
+            return "not_found"
+        if param_def.get("default_value") is not None:
+            return "confirmed_problem"
+        if param_def.get("value") is not None:
+            return "math_model_ir"
+        sf = param_def.get("source_file", "")
+        sc = param_def.get("source_column", "")
+        if sf and sc:
+            return f"csv:{sf}::{sc}"
+        if param_def.get("auto_injected"):
+            return "auto_inject"
+        return "fallback"
+
+    @staticmethod
     def _convert_time_values(values):
         """datetime.time 값을 분(minutes) 정수로 변환"""
         import datetime
@@ -458,6 +475,8 @@ class DataBinder:
             "sets": {},
             "parameters": {},
             "set_sizes": {},
+            "parameter_sources": {},  # F5: source tracking
+            "parameter_warnings": [],  # F11: validation warnings
         }
 
         # Parameters 먼저 바인딩 (set 보정에 필요)
@@ -467,6 +486,9 @@ class DataBinder:
             # datetime.time -> 분(minutes) 정수 변환
             values = self._convert_time_values(values)
             bound["parameters"][pid] = values
+            # source tracking
+            source = self._determine_source(p, values)
+            bound["parameter_sources"][pid] = source
 
         # ── Parameter alias: expression에서 사용하는 일반 이름에 대한 fallback 매핑 ──
         import re as _re
@@ -541,6 +563,25 @@ class DataBinder:
                                 logger.info(f"Set {sid}: auto-corrected from {len(values)} items to range(1..{size}) using param '{pname}'")
                                 values = list(range(1, size + 1))
                                 break
+
+            # 자동 보정: set이 crew/duty 인덱스인데 크기가 total_duties보다 과대한 경우
+            # (LLM이 데이터의 다른 숫자를 잘못 사용했을 때)
+            if len(values) > 50 and sid in ("J", "K", "crews", "duties"):
+                duty_params = ["total_duties", "total_crew_count", "total_crew"]
+                for pname in duty_params:
+                    pval = bound["parameters"].get(pname)
+                    if pval is not None:
+                        try:
+                            expected = int(float(str(pval)))
+                        except (ValueError, TypeError):
+                            continue
+                        if 0 < expected < len(values):
+                            logger.warning(
+                                f"Set {sid}: size {len(values)} exceeds param '{pname}'={expected}, "
+                                f"auto-correcting to range(1..{expected})"
+                            )
+                            values = list(range(1, expected + 1))
+                            break
 
             bound["sets"][sid] = values
             bound["set_sizes"][sid] = len(values)
@@ -618,6 +659,39 @@ class DataBinder:
                 _result[_k] = _v
                 _result[str(_k)] = _v
             bound["parameters"][_tp_id] = _result
+            bound["parameter_sources"][_tp_id] = "auto_inject:trips.csv"
             logger.info(f"Trip auto-inject: '{_tp_id}' loaded {len(_result)//2} values from trips.csv")
+
+        # ── F8: Binding summary log ──
+        total_params = len(bound["parameters"])
+        bound_params = sum(1 for v in bound["parameters"].values() if v is not None)
+        unbound = [k for k, v in bound["parameters"].items() if v is None]
+        logger.info(
+            f"DataBinder summary: {bound_params}/{total_params} params bound, "
+            f"{len(bound['sets'])} sets loaded, "
+            f"unbound: {unbound if unbound else 'none'}"
+        )
+
+        # ── F11: Parameter validation (range check against math_model definitions) ──
+        for p in math_model.get("parameters", []):
+            pid = p.get("id", "")
+            val = bound["parameters"].get(pid)
+            if val is None or isinstance(val, (dict, list)):
+                continue
+            try:
+                fval = float(val)
+            except (ValueError, TypeError):
+                continue
+            # 음수 시간 파라미터 체크
+            if pid.endswith("_minutes") or pid.endswith("_time") or pid.endswith("_min"):
+                if fval < 0:
+                    msg = f"Parameter '{pid}' = {fval}: 음수 시간 값 (바인딩 오류 가능)"
+                    bound["parameter_warnings"].append(msg)
+                    logger.warning(msg)
+            # 비현실적으로 큰 값 체크
+            if pid.endswith("_minutes") and fval > 2880:  # 48시간 초과
+                msg = f"Parameter '{pid}' = {fval}: 48시간 초과 (비현실적 값)"
+                bound["parameter_warnings"].append(msg)
+                logger.warning(msg)
 
         return bound

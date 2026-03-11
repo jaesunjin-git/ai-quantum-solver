@@ -86,6 +86,8 @@ export interface CompileSummary {
   compile_time_sec?: number;
   warnings?: string[];
   warning_count?: number;
+  parameter_sources?: Record<string, string>;
+  parameter_warnings?: string[];
 }
 
 // ── Result Data (솔버 실행 결과) ──
@@ -139,6 +141,16 @@ export interface ProblemDefinitionData {
     hard_constraints?: Record<string, any>;
     soft_constraints?: Record<string, any>;
     parameters?: Record<string, { value: any; source: string }>;
+    available_constraints?: {
+      name: string;
+      description: string;
+      default_category: 'hard' | 'soft';
+      fixed_category: boolean;
+      parameters: string[];
+      expression_template: string;
+      typical_range?: number[];
+      penalty_weight?: number;
+    }[];
   };
   confirmed_problem?: any;
   agent_status?: string;

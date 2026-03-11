@@ -105,6 +105,35 @@ class ProblemDefinitionSkill:
 
         return dk
 
+    def _get_available_constraints(
+        self, dk, current_hard: dict, current_soft: dict
+    ) -> list:
+        """현재 모델에 없는 constraints.yaml 카탈로그 제약 목록 반환."""
+        if not dk:
+            return []
+        used = set(current_hard.keys()) | set(current_soft.keys())
+        available = []
+        all_names = dk.all_constraint_names()
+        for name in all_names:
+            if name in used:
+                continue
+            cdata = dk.get_constraint(name)
+            if not cdata or not isinstance(cdata, dict):
+                continue
+            available.append({
+                "name": name,
+                "description": cdata.get("description", ""),
+                "default_category": cdata.get("default_category",
+                                               cdata.get("_meta", {}).get("original_category", "hard")),
+                "fixed_category": cdata.get("fixed_category",
+                                             cdata.get("_meta", {}).get("fixed_category", False)),
+                "parameters": cdata.get("parameters", []),
+                "expression_template": cdata.get("expression_template", ""),
+                "typical_range": cdata.get("typical_range"),
+                "penalty_weight": cdata.get("penalty_weight"),
+            })
+        return available
+
     # ──────────────────────────────────────
     # public entry point
     # ──────────────────────────────────────
@@ -147,6 +176,11 @@ class ProblemDefinitionSkill:
             "soft_constraints": constraints.get("soft", {}),
             "parameters": parameters,
         }
+
+        # 미사용 제약조건 카탈로그 (템플릿 기반 추가용)
+        proposal["available_constraints"] = self._get_available_constraints(
+            dk, constraints.get("hard", {}), constraints.get("soft", {})
+        )
 
         state.problem_definition = proposal
         state.problem_definition_proposed = True
@@ -1277,6 +1311,60 @@ class ProblemDefinitionSkill:
             pd = {}
 
         constraint_changes = event_data.get("constraint_changes", [])
+        new_constraints = event_data.get("new_constraints", [])
+
+        # ── 새 제약조건 추가 (템플릿 기반) ──
+        added_lines = []
+        if new_constraints:
+            dk = self._load_domain(state)
+            for nc in new_constraints:
+                cname = nc.get("name")
+                category = nc.get("category", "hard")
+                if not cname:
+                    continue
+                # 이미 존재하면 스킵
+                if cname in pd.get("hard_constraints", {}) or cname in pd.get("soft_constraints", {}):
+                    continue
+                # constraints.yaml에서 메타데이터 가져오기
+                template = dk.get_constraint(cname) if dk else None
+                if template:
+                    cdata = {
+                        "description": template.get("description", ""),
+                        "name_ko": template.get("description", cname),
+                        "expression_template": template.get("expression_template", ""),
+                        "for_each": template.get("for_each", ""),
+                        "parameters": template.get("parameters", []),
+                        "fixed": template.get("fixed_category", False),
+                        "changeable": not template.get("fixed_category", False),
+                        "detection_hints": template.get("detection_hints", []),
+                        "penalty_weight": template.get("penalty_weight", 10),
+                    }
+                else:
+                    cdata = {
+                        "description": nc.get("description", ""),
+                        "name_ko": nc.get("description", cname),
+                        "fixed": False,
+                        "changeable": True,
+                    }
+                target_key = f"{category}_constraints"
+                pd.setdefault(target_key, {})[cname] = cdata
+                added_lines.append(f"  - **{cdata['name_ko']}** ({category.upper()})")
+
+                # 제약에 필요한 파라미터도 추가
+                if template and template.get("parameters"):
+                    params = pd.get("parameters", {})
+                    for pname in template["parameters"]:
+                        if pname not in params:
+                            # reference_ranges에서 기본값 가져오기
+                            ref_val = None
+                            typical = template.get("typical_range")
+                            if typical and len(typical) >= 2:
+                                ref_val = typical[1]  # 상한을 기본값으로
+                            params[pname] = {
+                                "value": ref_val,
+                                "source": "reference_default" if ref_val else "user_input_required",
+                            }
+                    pd["parameters"] = params
 
         # 제약조건 변경 적용
         changed_lines = []
@@ -1308,6 +1396,8 @@ class ProblemDefinitionSkill:
         change_text = ""
         if changed_lines:
             change_text = f"\n\n**변경된 제약조건 ({len(changed_lines)}개):**\n" + "\n".join(changed_lines)
+        if added_lines:
+            change_text += f"\n\n**추가된 제약조건 ({len(added_lines)}개):**\n" + "\n".join(added_lines)
 
         return {
             "type": "problem_definition",

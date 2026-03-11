@@ -37,7 +37,7 @@ export default function AnalysisReport({
   onEvent?: (message: string, eventType: string, eventData: any) => void;
 }) {
   const {
-    analysisData: data, setAnalysisData, completedSteps, switchToStep,
+    analysisData: data, setAnalysisData, stepCache, completedSteps, switchToStep,
     stageValidation, setStageValidation,
   } = useAnalysis();
 
@@ -58,7 +58,9 @@ export default function AnalysisReport({
         const res = await fetch(`/api/projects/${projectId}/versions/timeline`);
         if (res.ok && !cancelled) {
           const body = await res.json();
-          const entries: VersionTimelineEntry[] = body.timeline || [];
+          const raw: VersionTimelineEntry[] = body.timeline || [];
+          // Filter out empty versions (no run_id and no status = never executed)
+          const entries = raw.filter(e => e.run_id != null || e.status != null);
           setVersionTimeline(entries);
           // Point to latest version
           if (entries.length > 0) {
@@ -204,7 +206,8 @@ export default function AnalysisReport({
 
   const showFlowBar = completedSteps.size > 0;
 
-  const renderContent = () => {
+  // Stateless views: conditionally rendered (unmount is fine)
+  const renderLightContent = () => {
     switch (viewMode) {
       case 'file_uploaded':
         return <FileUploadedView data={data as FileUploadedData} onAction={onAction} />;
@@ -216,15 +219,20 @@ export default function AnalysisReport({
         return <NormalizationView data={data as NormalizationData} onAction={onAction} />;
       case 'param_input':
       case 'math_model':
-        return <MathModelView data={data as MathModelData} onAction={onAction} />;
+        return <MathModelView data={data as MathModelData} onAction={onAction} onEvent={onEvent} projectId={projectId} />;
       case 'solver':
-        return <SolverView data={data as SolverData} onAction={onAction} projectId={projectId} onResultReady={setAnalysisData} />;
       case 'result':
-        return <OptimizationResultView data={data as ResultData} projectId={projectId} onAction={onAction} />;
+        return null; // rendered persistently below
       default:
         return <ReportView data={data as ReportData} projectId={projectId} onAction={onAction} />;
     }
   };
+
+  // Stateful views: keep mounted (hidden via CSS) to preserve local state on tab switch
+  const isSolverView = viewMode === 'solver';
+  const isResultView = viewMode === 'result';
+  const hasSolverData = !!stepCache.solver;
+  const hasResultData = !!stepCache.result;
 
   return (
     <div className="h-full flex flex-col">
@@ -247,7 +255,18 @@ export default function AnalysisReport({
         />
       )}
       <div className="flex-1 overflow-auto">
-        {renderContent()}
+        {renderLightContent()}
+        {/* Stateful views: kept mounted but hidden to preserve local state */}
+        {hasSolverData && (
+          <div className="h-full" style={{ display: isSolverView ? 'block' : 'none' }}>
+            <SolverView data={stepCache.solver as SolverData} onAction={onAction} projectId={projectId} onResultReady={setAnalysisData} />
+          </div>
+        )}
+        {hasResultData && (
+          <div className="h-full" style={{ display: isResultView ? 'block' : 'none' }}>
+            <OptimizationResultView data={(isResultView ? data : stepCache.result) as ResultData} projectId={projectId} onAction={onAction} />
+          </div>
+        )}
       </div>
 
       {/* Layer 3: Validation Drawer */}

@@ -2,10 +2,22 @@
 // v3.0 - 즉시 일괄 토글 + 확정 이벤트 전송
 import {
   ClipboardList, Check, Edit3, AlertTriangle,
-  ChevronDown, ChevronUp, X, Lock, RefreshCw, Info, Shield, ShieldAlert, RotateCcw
+  ChevronDown, ChevronUp, X, Lock, RefreshCw, Info, Shield, ShieldAlert, RotateCcw,
+  Plus, Search
 } from 'lucide-react';
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import type { ProblemDefinitionData } from './types';
+
+interface AvailableConstraint {
+  name: string;
+  description: string;
+  default_category: 'hard' | 'soft';
+  fixed_category: boolean;
+  parameters: string[];
+  expression_template: string;
+  typical_range?: number[];
+  penalty_weight?: number;
+}
 
 interface ConstraintEdit {
   name: string;
@@ -51,6 +63,10 @@ export function ProblemDefinitionView({
   const [edits, setEdits] = useState<ConstraintEdit[]>([]);
   const [showObjGate, setShowObjGate] = useState(false);
   const [selectedIdxs, setSelectedIdxs] = useState<Set<number>>(new Set());
+  const [showAddPanel, setShowAddPanel] = useState(false);
+  const [addSearch, setAddSearch] = useState('');
+  const [selectedToAdd, setSelectedToAdd] = useState<Set<string>>(new Set());
+  const [addCategory, setAddCategory] = useState<Record<string, 'hard' | 'soft'>>({});
 
   const proposal = data.proposal || data.confirmed_problem;
   const isConfirmed = data.view_mode === 'problem_defined';
@@ -60,6 +76,17 @@ export function ProblemDefinitionView({
   const softConstraints = proposal?.soft_constraints || {};
   const objective = proposal?.objective || {};
   const parameters = proposal?.parameters || {};
+  const availableConstraints: AvailableConstraint[] = (proposal as any)?.available_constraints || [];
+
+  // 추가 패널: 검색 필터링
+  const filteredAvailable = useMemo(() => {
+    if (!addSearch.trim()) return availableConstraints;
+    const q = addSearch.toLowerCase();
+    return availableConstraints.filter(c =>
+      c.name.toLowerCase().includes(q) ||
+      c.description.toLowerCase().includes(q)
+    );
+  }, [availableConstraints, addSearch]);
 
   // proposal이 바뀔 때 edits 재초기화 (편집 모드는 유지)
   useEffect(() => {
@@ -148,19 +175,33 @@ export function ProblemDefinitionView({
       .filter(e => e.changed)
       .map(e => ({ name: e.name, to: e.category }));
 
+    // 새로 추가할 제약조건
+    const newConstraints = Array.from(selectedToAdd).map(name => ({
+      name,
+      category: addCategory[name] || availableConstraints.find(c => c.name === name)?.default_category || 'hard',
+      description: availableConstraints.find(c => c.name === name)?.description || '',
+    }));
+
     const changeCount = changes.length;
-    const displayMsg = changeCount > 0
-      ? `문제 정의 확정 (제약조건 ${changeCount}개 수정 포함)`
+    const addCount = newConstraints.length;
+    const displayMsg = changeCount > 0 || addCount > 0
+      ? `문제 정의 확정 (${changeCount > 0 ? `수정 ${changeCount}개` : ''}${changeCount > 0 && addCount > 0 ? ', ' : ''}${addCount > 0 ? `추가 ${addCount}개` : ''})`
       : '문제 정의 확정';
 
     if (onEvent) {
-      onEvent(displayMsg, 'problem_definition_confirm', { constraint_changes: changes });
+      onEvent(displayMsg, 'problem_definition_confirm', {
+        constraint_changes: changes,
+        ...(newConstraints.length > 0 && { new_constraints: newConstraints }),
+      });
     } else {
       const msgs = changes.map(e => `${e.name} ${e.to}로 변경`);
       const finalMsg = msgs.length > 0 ? `확인\n${msgs.join('\n')}` : '확인';
       onAction?.('send', finalMsg);
     }
     setIsEditMode(false);
+    setShowAddPanel(false);
+    setSelectedToAdd(new Set());
+    setAddCategory({});
   };
 
   const confirmObjChange = () => {
@@ -468,6 +509,113 @@ export function ProblemDefinitionView({
           </div>
         )}
 
+        {/* 제약조건 추가 버튼 */}
+        {availableConstraints.length > 0 && (
+          <button
+            onClick={() => setShowAddPanel(!showAddPanel)}
+            className="w-full flex items-center justify-center gap-2 py-2.5 text-sm bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-xl hover:bg-indigo-500/20 transition-colors"
+          >
+            <Plus size={16} />
+            {showAddPanel ? '추가 패널 닫기' : `제약조건 추가 (${availableConstraints.length}개 사용 가능)`}
+          </button>
+        )}
+
+        {/* 제약조건 추가 패널 */}
+        {showAddPanel && availableConstraints.length > 0 && (
+          <section className="bg-indigo-500/5 rounded-xl p-4 border border-indigo-500/20 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-indigo-300">{'템플릿에서 제약조건 추가'}</h3>
+              {selectedToAdd.size > 0 && (
+                <span className="text-[11px] bg-indigo-500/30 text-indigo-300 px-2 py-0.5 rounded">
+                  {selectedToAdd.size + '개 선택'}
+                </span>
+              )}
+            </div>
+
+            {/* 검색 */}
+            <div className="relative">
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+              <input
+                type="text"
+                value={addSearch}
+                onChange={e => setAddSearch(e.target.value)}
+                placeholder="제약조건 검색..."
+                className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-800 border border-slate-700 rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            {/* 목록 */}
+            <div className="space-y-1 max-h-64 overflow-y-auto custom-scrollbar">
+              {filteredAvailable.map(c => {
+                const isSelected = selectedToAdd.has(c.name);
+                const cat = addCategory[c.name] || c.default_category;
+                return (
+                  <div key={c.name} className={
+                    'flex items-start gap-2 p-2 rounded-lg transition-colors cursor-pointer ' +
+                    (isSelected ? 'bg-indigo-500/15 border border-indigo-500/30' : 'hover:bg-slate-800/50 border border-transparent')
+                  }>
+                    <label className="flex items-center mt-0.5 flex-shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => {
+                          setSelectedToAdd(prev => {
+                            const next = new Set(prev);
+                            if (next.has(c.name)) next.delete(c.name);
+                            else next.add(c.name);
+                            return next;
+                          });
+                        }}
+                        className="w-3.5 h-3.5 rounded border-slate-500 bg-slate-700 text-indigo-500 focus:ring-indigo-500 focus:ring-1 cursor-pointer"
+                      />
+                    </label>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm text-slate-200 font-medium">{c.description}</span>
+                        {!c.fixed_category && isSelected && (
+                          <button
+                            onClick={e => {
+                              e.stopPropagation();
+                              setAddCategory(prev => ({
+                                ...prev,
+                                [c.name]: cat === 'hard' ? 'soft' : 'hard',
+                              }));
+                            }}
+                            className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                              cat === 'hard'
+                                ? 'bg-red-500/20 text-red-400 hover:bg-amber-500/20 hover:text-amber-400'
+                                : 'bg-amber-500/20 text-amber-400 hover:bg-red-500/20 hover:text-red-400'
+                            }`}
+                          >
+                            {cat === 'hard' ? 'Hard' : 'Soft'}
+                          </button>
+                        )}
+                        {!isSelected && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                            c.default_category === 'hard' ? 'bg-red-500/10 text-red-400/70' : 'bg-amber-500/10 text-amber-400/70'
+                          }`}>
+                            {c.default_category === 'hard' ? 'Hard' : 'Soft'}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-slate-500 font-mono mt-0.5">{c.name}</p>
+                      {c.parameters.length > 0 && (
+                        <p className="text-[10px] text-slate-500 mt-0.5">
+                          {'파라미터: ' + c.parameters.join(', ')}
+                          {c.typical_range && ` (범위: ${c.typical_range.join('~')})`}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+              {filteredAvailable.length === 0 && (
+                <p className="text-xs text-slate-500 text-center py-4">{'검색 결과가 없습니다.'}</p>
+              )}
+            </div>
+          </section>
+        )}
+
         {/* 파라미터 */}
         <section className="bg-slate-800/50 rounded-xl p-4 border border-slate-700">
           <button onClick={() => setShowParams(!showParams)}
@@ -520,7 +668,9 @@ export function ProblemDefinitionView({
         <button onClick={confirmProblem}
           className="flex-1 font-bold py-3 rounded-xl transition flex items-center justify-center gap-2 text-white bg-emerald-600 hover:bg-emerald-500">
           <Check size={18} />
-          {changedCount > 0 ? `문제 정의 확정 (${changedCount}개 수정 포함)` : '문제 정의 확정'}
+          {changedCount > 0 || selectedToAdd.size > 0
+            ? `문제 정의 확정 (${[changedCount > 0 ? `수정 ${changedCount}` : '', selectedToAdd.size > 0 ? `추가 ${selectedToAdd.size}` : ''].filter(Boolean).join(', ')}개)`
+            : '문제 정의 확정'}
         </button>
         {!isEditMode && (
           <button onClick={enterEditMode}

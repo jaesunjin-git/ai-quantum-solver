@@ -58,11 +58,12 @@ export function OptimizationResultView({
   }, [data.status, hasInterpreted]);
 
   const status = data.status || 'UNKNOWN';
-  const isFeasible = status === 'FEASIBLE' || status === 'OPTIMAL';
+  const isFeasible = status === 'FEASIBLE' || status === 'OPTIMAL' || status === 'INFEASIBLE_BEST';
 
   const statusConfig: Record<string, { icon: any; color: string; bg: string; border: string; label: string }> = {
     OPTIMAL: { icon: CheckCircle, color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30', label: 'Optimal' },
     FEASIBLE: { icon: CheckCircle, color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30', label: 'Feasible' },
+    INFEASIBLE_BEST: { icon: AlertTriangle, color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/30', label: 'Best Effort' },
     INFEASIBLE: { icon: XCircle, color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', label: 'Infeasible' },
     UNKNOWN: { icon: AlertTriangle, color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30', label: 'Unknown' },
   };

@@ -77,15 +77,19 @@ class ProblemDefinitionSkill:
     def _load_domain(self, state):
         """범용 도메인 로더를 통해 DomainKnowledge 반환"""
         try:
-            from knowledge.domain_loader import load_domain_knowledge, detect_domain_from_keywords
+            from knowledge.domain_loader import (
+                load_domain_knowledge, detect_domain_from_keywords,
+                resolve_domain_alias,
+            )
         except ImportError:
             logger.warning("domain_loader not available, falling back")
             return None
 
         domain = state.detected_domain or "generic"
 
-        # 직접 이름으로 시도
-        dk = load_domain_knowledge(domain)
+        # 별칭 해석 후 시도 (crew → railway 등, domain_aliases.yaml 기반)
+        canonical = resolve_domain_alias(domain)
+        dk = load_domain_knowledge(canonical)
         if dk.hard_constraints or dk.raw_single:
             return dk
 
@@ -96,14 +100,6 @@ class ProblemDefinitionSkill:
         detected = detect_domain_from_keywords(search_text)
         if detected:
             dk = load_domain_knowledge(detected)
-            if dk.hard_constraints or dk.raw_single:
-                return dk
-
-        # crew -> railway 매핑 시도
-        alias_map = {"crew": "railway", "train": "railway", "bus": "bus", "flight": "aviation"}
-        alias = alias_map.get(domain.lower())
-        if alias:
-            dk = load_domain_knowledge(alias)
             if dk.hard_constraints or dk.raw_single:
                 return dk
 
@@ -927,6 +923,7 @@ class ProblemDefinitionSkill:
 
         for p in params_raw:
             pname = str(p.get("param_name", "")).lower()
+            semantic_id = str(p.get("semantic_id", "")).lower()
             context = str(p.get("context", "")).lower()
             value = p.get("value")
 
@@ -938,6 +935,14 @@ class ProblemDefinitionSkill:
                 num_val = float(value)
             except (ValueError, TypeError):
                 continue
+
+            # semantic_id 직접 매칭 → 즉시 반환 (최우선)
+            if semantic_id and semantic_id == param_name.lower():
+                logger.info(
+                    f"Phase1 exact match by semantic_id: {param_name} = {num_val}"
+                    f" (param_name={pname}, semantic_id={semantic_id})"
+                )
+                return num_val
 
             # context_must 필터: 핵심 키워드 중 하나라도 context에 있어야 함
             if context_must and not any(cm in context or cm in pname for cm in context_must):
@@ -1356,14 +1361,20 @@ class ProblemDefinitionSkill:
                 "options": [],
             }
 
+        # ── 목적함수 변경 early detection (before modify keyword catch) ──
+        _is_objective_change = bool(
+            state.problem_definition and
+            ("목적함수" in message or "objective" in msg_lower)
+        )
+
         # ── 제약조건 카테고리 변경 early detection (before modify keyword catch) ──
         _cat_early = re.search(r'(\w+)\s+(?:를\s*|을\s*)?(?:로\s*)?(hard|soft)(?:로)?(?:\s*변경|\s*전환|\s*바꿔)', message, re.IGNORECASE)
         if not _cat_early:
             _cat_early = re.search(r'(?:change|move|switch|set)\s+(\w+)\s+(?:to\s+)?(hard|soft)', message, re.IGNORECASE)
         _is_category_change = bool(_cat_early and state.problem_definition)
 
-        # 수정 요청
-        if not _is_category_change and any(kw in msg_lower for kw in modify):
+        # 수정 요청 (목적함수 변경, 카테고리 변경은 전용 핸들러로 처리)
+        if not _is_category_change and not _is_objective_change and any(kw in msg_lower for kw in modify):
             return {
                 "type": "problem_definition",
                 "text": (
@@ -1374,7 +1385,11 @@ class ProblemDefinitionSkill:
                     "- [제약조건명] soft로 변경 (Hard→Soft)\n"
                     "- [제약조건명] hard로 변경 (Soft→Hard)\n"
                 ),
-                "data": {"agent_status": "modification_pending"},
+                "data": {
+                    "view_mode": "problem_definition",
+                    "proposal": state.problem_definition,
+                    "agent_status": "modification_pending",
+                },
                 "options": [],
             }
 
@@ -1401,12 +1416,13 @@ class ProblemDefinitionSkill:
         import re as _re
         obj_pattern = _re.compile(
             r"목적함수[를을]?\s*(.*?)(?:로|으로)\s*변경|"
+            r"목적함수[를을]?\s*(.+?)(?:로|으로|을|를)?\s*(?:변경|바꿔|바꾸)|"
             r"objective\s+(?:to\s+)?(\w+)",
             _re.IGNORECASE
         )
         obj_match = obj_pattern.search(message)
         if obj_match and state.problem_definition:
-            requested = (obj_match.group(1) or obj_match.group(2) or "").strip()
+            requested = (obj_match.group(1) or obj_match.group(2) or obj_match.group(3) or "").strip()
 
             # dk에서 objectives 로드
             dk = self._load_domain(state)
@@ -1460,6 +1476,8 @@ class ProblemDefinitionSkill:
                             f"계속하시겠습니까?"
                         ),
                         "data": {
+                            "view_mode": "problem_definition",
+                            "proposal": state.problem_definition,
                             "agent_status": "objective_change_warning",
                             "pending_objective": oname,
                         },
@@ -1526,6 +1544,15 @@ class ProblemDefinitionSkill:
                         if dk:
                             dk.move_constraint(cname, "hard", force=True)
 
+                # 파라미터 재수집 (제약조건 변경에 따라 필요 파라미터도 달라짐)
+                new_all_constraints = {
+                    "hard": state.problem_definition.get("hard_constraints", {}),
+                    "soft": state.problem_definition.get("soft_constraints", {}),
+                }
+                state.problem_definition["parameters"] = self._collect_parameters(
+                    state, project_id, dk, new_all_constraints
+                )
+
                 # 확정 상태 초기화 (재확인 필요)
                 state.constraints_confirmed = False
                 state.confirmed_constraints = None
@@ -1549,8 +1576,8 @@ class ProblemDefinitionSkill:
                         f"{change_text}\n\n"
                         f"아래에서 제약조건을 확인하고 필요시 수정해주세요."
                     ),
-                    "view_mode": "problem_definition",
                     "data": {
+                        "view_mode": "problem_definition",
                         "proposal": state.problem_definition,
                         "agent_status": "objective_changed_constraints_rebuilt",
                     },
@@ -1578,6 +1605,45 @@ class ProblemDefinitionSkill:
                         {"label": k, "action": "send",
                          "message": f"목적함수를 {v.get('description_ko', k)}로 변경"}
                         for k, v in list(objectives_map.items())[:4]
+                    ],
+                }
+
+        # ── 목적함수 변경 fallback: early detection 매치했으나 regex 미매치 시 ──
+        if _is_objective_change and state.problem_definition:
+            dk = self._load_domain(state)
+            import yaml as _yaml2
+            domain_name = state.problem_definition.get("domain", "railway")
+            _constraints_path2 = f"knowledge/domains/{domain_name}/constraints.yaml"
+            try:
+                with open(_constraints_path2, encoding="utf-8") as _f2:
+                    _cdata2 = _yaml2.safe_load(_f2)
+                objectives_map2 = _cdata2.get("objectives", {})
+            except Exception:
+                objectives_map2 = {}
+
+            if objectives_map2:
+                obj_list = "\n".join([
+                    f"- **{k}**: {v.get('description_ko', v['description'])}"
+                    for k, v in objectives_map2.items()
+                ])
+                current_obj = state.problem_definition.get("objective", {})
+                current_desc = current_obj.get("description_ko", current_obj.get("description", ""))
+                return {
+                    "type": "problem_definition",
+                    "text": (
+                        f"현재 목적함수: **{current_desc}**\n\n"
+                        f"**변경 가능한 목적함수:**\n{obj_list}\n\n"
+                        f"변경할 목적함수를 선택해주세요."
+                    ),
+                    "data": {
+                        "view_mode": "problem_definition",
+                        "proposal": state.problem_definition,
+                        "agent_status": "objective_change_selection",
+                    },
+                    "options": [
+                        {"label": v.get("description_ko", k), "action": "send",
+                         "message": f"목적함수를 {v.get('description_ko', k)}로 변경"}
+                        for k, v in list(objectives_map2.items())[:4]
                     ],
                 }
 
@@ -1736,6 +1802,7 @@ class ProblemDefinitionSkill:
                         "**확인**을 입력하면 문제 정의가 확정됩니다."
                     ),
                     "data": {
+                        "view_mode": "problem_definition",
                         "proposal": state.problem_definition,
                         "agent_status": "parameters_modified",
                     },
@@ -1752,7 +1819,11 @@ class ProblemDefinitionSkill:
                 "**확인**, **수정**, 또는 **다시 분석**을 입력해주세요.\n"
                 "파라미터 수정은 `파라미터명 = 값` 형식으로 입력할 수 있습니다."
             ),
-            "data": {"agent_status": "awaiting_response"},
+            "data": {
+                "view_mode": "problem_definition",
+                "proposal": state.problem_definition,
+                "agent_status": "awaiting_response",
+            },
             "options": [
                 {"label": "확인", "action": "send", "message": "확인"},
                 {"label": "수정", "action": "send", "message": "수정"},

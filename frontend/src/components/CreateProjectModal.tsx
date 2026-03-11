@@ -15,26 +15,28 @@ export default function CreateProjectModal({ onClose, onCreated }: CreateProject
   const [selectedType, setSelectedType] = useState('crew'); 
   const [isLoading, setIsLoading] = useState(false);
   
-  const { user } = useAuth();
+  const { user, token } = useAuth();
 
   const handleCreate = async () => {
     if (!title.trim()) {
         alert("프로젝트 이름을 입력해주세요.");
         return;
     }
-    // AuthContext가 아직 완벽하지 않다면 안전장치
-    const ownerName = user?.name || "user_client_v1";
+    const ownerName = user?.name || "user";
 
     setIsLoading(true);
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/projects`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            title, 
-            type: selectedType, // 🌟 여기서 선택된 타입이 백엔드 DB에 저장됨
-            owner: ownerName 
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+            title,
+            type: selectedType,
+            owner: ownerName
         }),
       });
 

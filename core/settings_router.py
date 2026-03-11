@@ -1,5 +1,5 @@
-"""솔버 설정 API — Admin 전용"""
-from fastapi import APIRouter, Depends, Query, HTTPException
+"""솔버 설정 API — Admin 전용 (JWT 인증)"""
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
@@ -7,6 +7,8 @@ import logging
 
 from .database import get_db
 from . import models
+from .auth import get_current_user, require_admin
+from .models import UserDB
 from engine.solver_registry import SolverRegistry
 
 logger = logging.getLogger(__name__)
@@ -22,15 +24,15 @@ class SolverSettingOut(BaseModel):
     description: str
     enabled: bool
     has_api_key: bool
-    time_limit_sec: Optional[int] = None   # NULL이면 YAML 기본값 사용
-    time_limit_default: Optional[int] = None  # YAML max_time_seconds (표시용)
+    time_limit_sec: Optional[int] = None
+    time_limit_default: Optional[int] = None
 
 
 class SolverSettingUpdate(BaseModel):
     solver_id: str
     enabled: bool
     api_key: Optional[str] = None
-    time_limit_sec: Optional[int] = None   # NULL이면 YAML 기본값으로 복원
+    time_limit_sec: Optional[int] = None
 
 
 class SolverSettingsBulkUpdate(BaseModel):
@@ -40,7 +42,7 @@ class SolverSettingsBulkUpdate(BaseModel):
 # ── GET: 전체 솔버 목록 + 활성 상태 ──
 @router.get("/solvers", response_model=List[SolverSettingOut])
 def get_solver_settings(
-    role: str = Query(default="user"),
+    current_user: UserDB = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """모든 솔버 목록과 활성화 상태를 반환"""
@@ -73,13 +75,10 @@ def get_solver_settings(
 @router.put("/solvers")
 def update_solver_settings(
     body: SolverSettingsBulkUpdate,
-    role: str = Query(default="user"),
+    current_user: UserDB = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """솔버 활성화 상태 및 API 키 일괄 저장 (Admin 전용)"""
-    if role != "admin":
-        raise HTTPException(status_code=403, detail="관리자 권한이 필요합니다.")
-
     for item in body.solvers:
         row = db.query(models.SolverSettingDB).filter_by(
             solver_id=item.solver_id
@@ -89,25 +88,25 @@ def update_solver_settings(
             row.enabled = item.enabled
             if item.api_key is not None:
                 row.api_key = item.api_key
-            row.time_limit_sec = item.time_limit_sec  # NULL이면 YAML 기본값으로 복원
-            row.updated_by = "admin"
+            row.time_limit_sec = item.time_limit_sec
+            row.updated_by = current_user.username
         else:
             row = models.SolverSettingDB(
                 solver_id=item.solver_id,
                 enabled=item.enabled,
                 api_key=item.api_key,
                 time_limit_sec=item.time_limit_sec,
-                updated_by="admin",
+                updated_by=current_user.username,
             )
             db.add(row)
-    
+
     # 솔버 설정 변경 시 모든 세션의 캐시 무효화
     db.query(models.SessionStateDB).update(
         {models.SessionStateDB.last_pre_decision_result: None}
     )
 
     db.commit()
-    logger.info(f"Solver settings updated: {len(body.solvers)} solvers")
+    logger.info(f"Solver settings updated by {current_user.username}: {len(body.solvers)} solvers")
     return {"status": "ok", "updated": len(body.solvers)}
 
 

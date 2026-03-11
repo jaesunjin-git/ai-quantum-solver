@@ -17,7 +17,8 @@ export default function Dashboard() {
   const [editTitle, setEditTitle] = useState('');
 
   const { projects, refreshProjects, setCurrentProject } = useProjectContext();
-  const { user } = useAuth();
+  const { user, token } = useAuth();
+  const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
 
   // RBAC 필터링
   const filteredProjects = projects.filter(project => {
@@ -53,10 +54,10 @@ export default function Dashboard() {
   try {
     const API = import.meta.env.VITE_API_BASE_URL || '';
     const res = await fetch(
-      `${API}/api/projects/${projectId}?user=${encodeURIComponent(user.name)}&role=${user.role}`,
+      `${API}/api/projects/${projectId}`,
       {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
         body: JSON.stringify({ title: trimmed }),
       }
     );
@@ -75,13 +76,9 @@ export default function Dashboard() {
     if (!deleteTarget || !user) return;
     setDeleting(true);
     try {
-      const params = new URLSearchParams({
-        user: user.name,
-        role: user.role,
-      });
       const res = await fetch(
-        `${API_BASE_URL}/api/projects/${deleteTarget.id}?${params.toString()}`,
-        { method: 'DELETE' },
+        `${API_BASE_URL}/api/projects/${deleteTarget.id}`,
+        { method: 'DELETE', headers: authHeaders },
       );
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));

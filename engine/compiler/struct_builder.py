@@ -18,10 +18,11 @@ logger = logging.getLogger(__name__)
 class BuildContext:
     """변수맵, 파라미터맵, 세트맵을 관리하는 빌드 컨텍스트"""
 
-    def __init__(self, var_map: Dict[str, Any], param_map: Dict[str, Any], set_map: Dict[str, List]):
+    def __init__(self, var_map: Dict[str, Any], param_map: Dict[str, Any], set_map: Dict[str, List], model=None):
         self.var_map = var_map
         self.param_map = param_map
         self.set_map = set_map
+        self.model = model  # optional: CP-SAT/LP model for auxiliary variable creation
 
         # ── 역색인 캐시: set value → index (O(1) 조회용) ──
         # get_param_indexed에서 list params의 list.index() O(N) 반복을 제거
@@ -324,7 +325,24 @@ def eval_node(node: Any, binding: Dict[str, Any], ctx: BuildContext) -> Any:
 
     # sum 노드
     if 'sum' in node:
-        return eval_sum_node(node['sum'], binding, ctx)
+        sum_val = node['sum']
+        if isinstance(sum_val, str):
+            # String expression sum (e.g., YAML: {sum: "y[j]*(1-is_night[j])", for_each: "j in J"})
+            # Delegate to expression_parser which handles CP-SAT BoolVar multiplication
+            from engine.compiler.expression_parser import _parse_for_each, _eval_expr
+            for_each_str = node.get('for_each', '')
+            bindings = _parse_for_each(for_each_str, ctx)
+            result = None
+            for inner_binding in bindings:
+                merged = {**binding, **inner_binding}
+                str_merged = {k: str(v) for k, v in merged.items()}
+                term = _eval_expr(sum_val, str_merged, ctx, ctx.var_map, ctx.model)
+                if result is None:
+                    result = term
+                else:
+                    result = result + term
+            return result if result is not None else 0
+        return eval_sum_node(sum_val, binding, ctx)
 
     # multiply 노드
     if 'multiply' in node:

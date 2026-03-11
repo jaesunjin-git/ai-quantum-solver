@@ -146,6 +146,31 @@ class CrewAgent:
                     {"event_type": event_type, "event_data": event_data or {}},
                 )
 
+            # ── 0-A. 목적함수 변경/지정 요청 → 문제 정의 단계로 라우팅 ──
+            # quick_classify가 "목적함수"를 MATH_MODEL 키워드로 잘못 분류하는 것을 방지
+            _msg_lower = message.lower()
+            # Case 1: "목적함수 변경/바꿔" — 명시적 변경 요청
+            _obj_change_verb = "목적함수" in message and any(kw in _msg_lower for kw in ["변경", "바꿔", "바꾸"])
+            # Case 2: "목적함수를 ..." — 조사 '를/을' 포함 → 목적함수를 지정/수정하려는 의도
+            #         단, "보여줘" 등 단순 조회 요청은 제외
+            _obj_spec = ("목적함수를" in message or "목적함수을" in message) and not any(kw in _msg_lower for kw in ["보여"])
+            if _obj_change_verb or _obj_spec:
+                logger.info(f"[{project_id}] Objective change detected → PROBLEM_DEFINITION")
+                session.history.append({"role": "user", "content": message})
+                if session.state.math_model:
+                    session.state.reset_from_math_model()
+                session.state.problem_defined = False
+                save_session_state(project_id, session.state)
+                return await self._execute_skill(session, project_id, "PROBLEM_DEFINITION", message, {})
+
+            # ── 0-B. 수학 모델 확정/재생성 최우선 체크 ──
+            # quick_classify → LLM 경로 어디에서도 스킵되지 않도록 가장 먼저 처리
+            if session.state.math_model and not session.state.math_model_confirmed:
+                _confirm_kw = ["확정", "확인", "맞", "다시", "재생성"]
+                if any(kw in message for kw in _confirm_kw):
+                    session.history.append({"role": "user", "content": message})
+                    return await handle_math_model_confirm(self.model, session, project_id, message)
+
             # ── 1차: 키워드 빠른 우선분류 ──
             quick_intent = InputClassifier.quick_classify(message, has_file=has_file, current_tab=current_tab)
 
@@ -165,10 +190,6 @@ class CrewAgent:
                         return await direct_handlers[quick_intent](session, project_id, event_data)
                     return await direct_handlers[quick_intent](session, project_id, message)
 
-                if session.state.math_model and not session.state.math_model_confirmed:
-                    confirm_keywords = ["확정", "확인", "맞", "다시", "재생성", "목적함수", "변경"]
-                    if any(kw in message for kw in confirm_keywords):
-                        return await handle_math_model_confirm(self.model, session, project_id, message)
 
                 # ★ Action 스킬에 대해서도 질문 패턴이면 LLM으로 위임
                 # (quick_classify가 내용 키워드로 잘못 분류했을 경우 보정)

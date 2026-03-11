@@ -28,7 +28,7 @@ export default function SolverSettings() {
   const fetchSettings = async () => {
     try {
       const token = localStorage.getItem('token') || '';
-      const res = await fetch('/api/settings/solvers?role=admin', {
+      const res = await fetch('/api/settings/solvers', {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (res.ok) {
@@ -92,7 +92,7 @@ export default function SolverSettings() {
           };
         }),
       };
-      const res = await fetch('/api/settings/solvers?role=admin', {
+      const res = await fetch('/api/settings/solvers', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

@@ -7,6 +7,7 @@ EXECUTOR_MAP = {
     "ortools_lp": ORToolsExecutor,
     "cqm": DWaveExecutor,
     "bqm": DWaveExecutor,
+    "nl": DWaveExecutor,
 }
 
 

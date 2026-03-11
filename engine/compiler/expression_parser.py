@@ -3,6 +3,63 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ── CP-SAT BoolVar multiplication support ──
+_mul_aux_counter = [0]
+
+
+def _safe_multiply(left, right, model_or_solver):
+    """
+    Safely multiply two values.
+    When both are CP-SAT solver variables/expressions (e.g., BoolVar * (1 - BoolVar)),
+    creates auxiliary IntVar + add_multiplication_equality instead of using Python '*'.
+    """
+    # Both plain numbers → direct multiplication
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left * right
+
+    # One side is a plain number → scalar * var (CP-SAT handles natively)
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        if isinstance(left, float) and left == int(left):
+            left = int(left)
+        if isinstance(right, float) and right == int(right):
+            right = int(right)
+        return left * right
+
+    # Both solver objects → need auxiliary variable for CP-SAT
+    if model_or_solver is None:
+        logger.warning("Cannot multiply solver variables without model reference")
+        return 0
+
+    try:
+        from ortools.sat.python import cp_model
+        if not isinstance(model_or_solver, cp_model.CpModel):
+            # LP solver — direct multiplication supported
+            return left * right
+    except ImportError:
+        return left * right
+
+    _mul_aux_counter[0] += 1
+    idx = _mul_aux_counter[0]
+
+    def _to_int_var(val, tag):
+        """Convert LinearExpr to IntVar if needed (for add_multiplication_equality)."""
+        if isinstance(val, cp_model.IntVar):
+            return val
+        # LinearExpr (e.g., 1 - BoolVar) → auxiliary IntVar with [0,1] bounds
+        aux = model_or_solver.new_int_var(0, 1, f"_aux{idx}_{tag}")
+        model_or_solver.add(aux == val)
+        return aux
+
+    try:
+        lv = _to_int_var(left, "L")
+        rv = _to_int_var(right, "R")
+        pv = model_or_solver.new_int_var(0, 1, f"_prod{idx}")
+        model_or_solver.add_multiplication_equality(pv, [lv, rv])
+        return pv
+    except Exception as e:
+        logger.warning(f"CP-SAT var*var auxiliary failed: {e}")
+        return 0
+
 
 def parse_and_apply_expression(model_or_solver, expr_str, for_each_str, ctx, var_map):
     for op in ['<=', '>=', '==']:
@@ -112,7 +169,7 @@ def _eval_expr(expr_str, binding, ctx, var_map, model_or_solver):
     if mul_pos is not None:
         left = _eval_expr(expr_str[:mul_pos], binding, ctx, var_map, model_or_solver)
         right = _eval_expr(expr_str[mul_pos+1:], binding, ctx, var_map, model_or_solver)
-        return left * right
+        return _safe_multiply(left, right, model_or_solver)
 
     try:
         val = float(expr_str)

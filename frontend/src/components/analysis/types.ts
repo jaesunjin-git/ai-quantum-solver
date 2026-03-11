@@ -165,6 +165,112 @@ export interface NormalizationMapping {
   column_mapping?: Record<string, string>;
 }
 
+// ── Platform Validation Types (도메인 무관 공통 타입) ──
+
+export interface AutoFix {
+  param: string;
+  old_val?: any;
+  new_val?: any;
+  action: string;    // "set" | "cap_to" | "remove" | "replace"
+  label?: string;    // 버튼 라벨
+}
+
+export interface UserInputSpec {
+  param: string;
+  input_type: string;   // "number" | "text" | "select" | "time"
+  placeholder?: string;
+  options?: string[];
+  default?: any;
+  unit?: string;
+}
+
+export interface ValidationItem {
+  code: string;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  stage: number;
+  detail?: string;
+  suggestion?: string;
+  auto_fix?: AutoFix;
+  user_input?: UserInputSpec;
+  context?: Record<string, any>;
+  dismissed: boolean;
+}
+
+export interface StageValidation {
+  stage: number;
+  passed: boolean;
+  blocking: boolean;
+  error_count: number;
+  warning_count: number;
+  info_count: number;
+  validators_run: string[];
+  items: ValidationItem[];
+}
+
+// ── Version Timeline Types ──
+
+export interface VersionTimelineEntry {
+  version_label: string;    // "v1", "v2", ...
+  version_index: number;
+  run_id: number | null;
+  model_version_id: number | null;
+  dataset_version_id: number | null;
+  solver_id: string | null;
+  solver_name: string | null;
+  status: string | null;
+  objective_value: number | null;
+  compile_time_sec: number | null;
+  execute_time_sec: number | null;
+  model_version: number | null;
+  dataset_version: number | null;
+  variable_count: number | null;
+  constraint_count: number | null;
+  created_at: string | null;
+  changes: string[];
+}
+
+export interface VersionTimeline {
+  project_id: number;
+  total_versions: number;
+  timeline: VersionTimelineEntry[];
+}
+
+export interface VersionCompareSummary {
+  run_id: number;
+  solver_id: string;
+  solver_name: string;
+  status: string;
+  objective_value: number | null;
+  compile_time_sec: number | null;
+  execute_time_sec: number | null;
+  model_version_id: number | null;
+  model_version: number | null;
+  variable_count: number | null;
+  constraint_count: number | null;
+  kpi: Record<string, any>;
+  parameters: Record<string, any>;
+  created_at: string | null;
+}
+
+export interface KpiDiffEntry {
+  a: any; b: any;
+  delta: number | null;
+  direction: 'improved' | 'degraded' | 'same' | 'unknown';
+}
+
+export interface VersionCompare {
+  project_id: number;
+  a: VersionCompareSummary;
+  b: VersionCompareSummary;
+  kpi_diff: Record<string, KpiDiffEntry>;
+  param_diff: Record<string, { a: any; b: any }>;
+  solver_changed: boolean;
+  model_changed: boolean;
+}
+
+// ── Union + Props ──
+
 export type AnalysisData =
   | ReportData | SolverData | ResultData
   | FileUploadedData | MathModelData
@@ -174,6 +280,7 @@ export interface AnalysisReportProps {
   data: AnalysisData;
   projectId?: string;
   onAction?: (type: string, message: string) => void;
+  validation?: StageValidation;
 }
 
 
@@ -211,6 +318,14 @@ export interface ConstraintCheck {
   limit: string;
   max_actual: string;
   satisfied: boolean;
+  constraint_type?: 'structural' | 'parametric';
+}
+
+export interface SoftConstraintCheck {
+  name: string;
+  id: string;
+  status: 'skipped' | 'applied';
+  note?: string;
 }
 
 export interface InterpretedResult {
@@ -223,5 +338,6 @@ export interface InterpretedResult {
   kpi: Record<string, any>;
   duties: DutyDetail[];
   constraint_status: ConstraintCheck[];
+  soft_constraint_status?: SoftConstraintCheck[];
   warnings: string[];
 }

@@ -28,6 +28,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from core.database import get_db
+from engine.validation.registry import get_registry
 from core.models import ChatHistoryDB
 from core.schemas import ChatRequest, ChatResponse
 from .chat_service import process_user_intents
@@ -80,28 +81,18 @@ def _validate_extension(filename: str) -> None:
 
 
 # ============================================================
-# 인증 헬퍼 (RBAC 호환)
-# ============================================================
-def _get_optional_user() -> Optional[str]:
-    """
-    현재 PW 미구현 상태이므로 인증 없이 통과.
-    프로덕션 전환 시:
-        from core.auth import get_current_user
-        def _get_optional_user(user = Depends(get_current_user)):
-            return user.id
-    """
-    return None
-
-
-# ============================================================
 # 1) 채팅 메시지
 # ============================================================
+from core.auth import get_current_user
+from core.models import UserDB
+
 @router.post("/chat/message", response_model=ChatResponse)
 async def chat_endpoint(
     payload: ChatRequest,
+    current_user: UserDB = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    current_user_id = "Super Admin"
+    current_user_id = current_user.display_name or current_user.username
 
     # 1) 사용자 메시지 저장
     if payload.message and payload.message.strip():
@@ -152,6 +143,7 @@ async def chat_endpoint(
 async def upload_files(
     project_id: str = Form(...),
     files: List[UploadFile] = File(...),
+    current_user: UserDB = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     if not project_id:
@@ -202,6 +194,19 @@ async def upload_files(
             logger.error(f"File save error [{f.filename}]: {e}")
             errors.append({"filename": f.filename or "unknown", "error": str(e)})
 
+    # ── Stage 1 validation (upload) ──
+    upload_validation = None
+    if saved_files:
+        try:
+            registry = get_registry()
+            stage_result = registry.run_stage(1, context={
+                "files": saved_files,
+                "project_id": str(safe_pid),
+            })
+            upload_validation = stage_result.to_dict()
+        except Exception as e:
+            logger.warning(f"Upload validation failed: {e}")
+
     # ── 업로드 완료 후 agent에 file_upload 이벤트 전달 ──
     agent_response = None
     if saved_files:
@@ -210,7 +215,7 @@ async def upload_files(
                 db=db,
                 user_message="",
                 project_id=str(safe_pid),
-                user_id="Super Admin",
+                user_id=current_user.display_name or current_user.username,
                 event_type="file_upload",
                 event_data={"files": saved_files},
             )
@@ -224,6 +229,9 @@ async def upload_files(
         "uploaded_files": saved_files,
         "message": f"{len(saved_files)}개 파일 업로드 완료",
     }
+
+    if upload_validation:
+        response["validation"] = upload_validation
 
     if errors:
         response["errors"] = errors
@@ -617,7 +625,11 @@ _pipeline = SolverPipeline()
 
 
 @router.post('/solve')
-async def solve_optimization(request: dict, db: Session = Depends(get_db)):
+async def solve_optimization(
+    request: dict,
+    current_user: UserDB = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     project_id = request.get('project_id')
     solver_id = request.get('solver_id')
     solver_name = request.get('solver_name', '')
@@ -717,6 +729,11 @@ async def solve_optimization(request: dict, db: Session = Depends(get_db)):
                 'recovery_log': result.recovery_log if hasattr(result, 'recovery_log') else [],
             }
         else:
+            # INFEASIBLE 진단 정보 추출
+            infeasibility_info = None
+            if result.execute_result and result.execute_result.infeasibility_info:
+                infeasibility_info = result.execute_result.infeasibility_info
+
             return {
                 'success': False,
                 'phase': result.phase,
@@ -728,6 +745,7 @@ async def solve_optimization(request: dict, db: Session = Depends(get_db)):
                 'fallback_solvers': result.pipeline_error.fallback_solvers if hasattr(result, 'pipeline_error') and result.pipeline_error else [],
                 'compile_warnings': result.compile_result.warnings if result.compile_result else [],
                 'recovery_log': result.recovery_log if hasattr(result, 'recovery_log') else [],
+                'infeasibility_info': infeasibility_info,
             }
 
     except Exception as e:

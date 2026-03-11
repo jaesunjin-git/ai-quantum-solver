@@ -54,7 +54,60 @@ def _finalize_response(result_dict: dict) -> dict:
     result_dict.setdefault("data", None)
     result_dict.setdefault("type", "text")
     result_dict.setdefault("options", [])
+
+    # ── Auto-inject stage validation based on view_mode ──
+    _inject_stage_validation(result_dict)
+
     return result_dict
+
+
+# view_mode → validation stage mapping
+_VIEW_MODE_STAGE = {
+    "problem_defined": 3,
+    "problem_definition": 3,
+    "normalization_mapping": 4,
+    "normalization_complete": 4,
+}
+
+
+def _inject_stage_validation(result_dict: dict) -> None:
+    """Run stage validation if the response's view_mode maps to a validatable stage."""
+    data = result_dict.get("data")
+    if not isinstance(data, dict):
+        return
+    if data.get("validation"):
+        return  # Already has validation (e.g., post-solve injects its own)
+
+    view_mode = data.get("view_mode", "")
+    stage = _VIEW_MODE_STAGE.get(view_mode)
+    if stage is None:
+        return
+
+    try:
+        from engine.validation.registry import get_registry
+        registry = get_registry()
+
+        # Build context from data
+        context = {}
+        if stage == 3:
+            # Problem definition stage
+            confirmed = data.get("confirmed_problem") or data.get("proposal", {})
+            context["parameters"] = confirmed.get("parameters", {})
+            context["domain"] = confirmed.get("domain", data.get("domain", "railway"))
+            context["confirmed_problem"] = confirmed
+        elif stage == 4:
+            # Normalization stage
+            context["mappings"] = data.get("mappings", {})
+            context["results"] = data.get("results", [])
+            context["errors"] = data.get("errors", [])
+            context["original_stats"] = data.get("original_stats", {})
+            context["normalized_stats"] = data.get("normalized_stats", {})
+
+        stage_result = registry.run_stage(stage, context)
+        if stage_result.items:
+            data["validation"] = stage_result.to_dict()
+    except Exception as e:
+        logger.warning(f"Stage validation injection failed: {e}")
 
 
 def _resolve_project_type(db: Session, project_id: str) -> str:

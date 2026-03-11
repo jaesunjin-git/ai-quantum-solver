@@ -109,6 +109,7 @@ class DWaveCQMCompiler(BaseCompiler):
                 var_map=var_map,
                 param_map=param_map,
                 set_map=set_map,
+                model=cqm,
             )
 
             # ── 4. 제약조건 (struct_builder 활용) ──

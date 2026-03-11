@@ -918,6 +918,107 @@ constraints:
     - 공평
     - 편차
     category: soft
+
+  # ── 승무원 인원 고정 제약 ──
+  fixed_day_crew_count:
+    description: 주간 근무 승무원 수 고정
+    expression_template: "sum(y[j] * (1 - is_night[j]) for j in J) == day_crew_count"
+    structured:
+      lhs: {sum: "y[j] * (1 - is_night[j])", for_each: "j in J"}
+      operator: "=="
+      rhs: {param: "day_crew_count"}
+    for_each: ""
+    parameters:
+      day_crew_count:
+        description: 주간 근무 승무원 수
+        description_ko: 주간사업 인원
+        default: null
+        source: user_input_required
+        typical_range: [10, 100]
+        detection_hints:
+        - 주간사업
+        - 주간근무
+        - 주간 인원
+        - day crew
+        - day shift
+        context_must:
+        - 주간
+    fixed: false
+    changeable: true
+    name_ko: 주간 승무원 수 고정
+    detection_hints:
+    - 주간사업
+    - 주간근무
+    - 주간 인원
+    - day crew count
+    context_must:
+    - 주간
+    category: hard
+
+  fixed_night_crew_count:
+    description: 야간 근무 승무원 수 고정
+    expression_template: "sum(y[j] * is_night[j] for j in J) == night_crew_count"
+    structured:
+      lhs: {sum: "y[j] * is_night[j]", for_each: "j in J"}
+      operator: "=="
+      rhs: {param: "night_crew_count"}
+    for_each: ""
+    parameters:
+      night_crew_count:
+        description: 야간 근무 승무원 수
+        description_ko: 야간사업 인원
+        default: null
+        source: user_input_required
+        typical_range: [5, 50]
+        detection_hints:
+        - 야간사업
+        - 야간근무
+        - 야간 인원
+        - night crew
+        - night shift
+        context_must:
+        - 야간
+    fixed: false
+    changeable: true
+    name_ko: 야간 승무원 수 고정
+    detection_hints:
+    - 야간사업
+    - 야간근무
+    - 야간 인원
+    - night crew count
+    context_must:
+    - 야간
+    category: hard
+
+  fixed_total_duties:
+    description: 총 사업(duty) 수 고정
+    expression_template: "sum(y[j] for j in J) == total_duties"
+    structured:
+      lhs: {sum: "y[j]", for_each: "j in J"}
+      operator: "=="
+      rhs: {param: "total_duties"}
+    for_each: ""
+    parameters:
+      total_duties:
+        description: 총 사업 수
+        description_ko: 총 사업수
+        default: null
+        source: user_input_required
+        typical_range: [20, 200]
+        detection_hints:
+        - 총 사업
+        - 전체 사업
+        - total duties
+        - 사업수
+    fixed: false
+    changeable: true
+    name_ko: 총 사업 수 고정
+    detection_hints:
+    - 총 사업
+    - 사업수
+    - total duties
+    category: hard
+
 objectives:
   minimize_duties:
     type: minimize

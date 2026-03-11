@@ -3,6 +3,20 @@ from sqlalchemy.orm import relationship
 from .database import Base
 import datetime
 
+# 0. [Core] 사용자 인증
+class UserDB(Base):
+    __tablename__ = "users"
+    __table_args__ = {"schema": "core"}
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False, index=True)
+    hashed_password = Column(String, nullable=False)
+    display_name = Column(String, nullable=True)
+    role = Column(String, default="user")  # "admin" | "user"
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
 # 1. [Domain] 비즈니스 로직 관련
 class MenuDB(Base):
     __tablename__ = "menus"

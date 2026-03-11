@@ -64,11 +64,27 @@ class ORToolsExecutor(BaseExecutor):
 
         logger.info(f"CP-SAT: status={status_str}, obj={obj_val}, time={elapsed:.2f}s")
 
+        # Extract best bound for optimality gap calculation
+        best_bound = None
+        if success:
+            try:
+                best_bound = solver.best_objective_bound
+            except Exception:
+                pass
+
+        # INFEASIBLE 진단
+        infeasibility_info = None
+        if status == cp_model.INFEASIBLE:
+            infeasibility_info = self._diagnose_infeasibility(
+                compile_result, solver, elapsed
+            )
+
         return ExecuteResult(
             success=success,
             solver_type="ortools_cp",
             status=status_str,
             objective_value=obj_val,
+            best_bound=best_bound,
             solution=solution,
             execution_time_sec=round(elapsed, 3),
             solver_info={
@@ -76,7 +92,9 @@ class ORToolsExecutor(BaseExecutor):
                 "conflicts": solver.num_conflicts,
                 "wall_time": solver.wall_time,
                 "num_workers": 8,
+                "best_bound": best_bound,
             },
+            infeasibility_info=infeasibility_info,
         )
 
     def _execute_lp(self, compile_result, time_limit) -> ExecuteResult:
@@ -118,15 +136,114 @@ class ORToolsExecutor(BaseExecutor):
 
         logger.info(f"LP/MIP: status={status_str}, obj={obj_val}, time={elapsed:.2f}s")
 
+        # Extract best bound for optimality gap calculation
+        best_bound = None
+        if success:
+            try:
+                best_bound = solver.Objective().BestBound()
+            except Exception:
+                pass
+
         return ExecuteResult(
             success=success,
             solver_type="ortools_lp",
             status=status_str,
             objective_value=obj_val,
+            best_bound=best_bound,
             solution=solution,
             execution_time_sec=round(elapsed, 3),
             solver_info={
                 "iterations": solver.iterations(),
                 "nodes": solver.nodes(),
+                "best_bound": best_bound,
             },
         )
+
+    # ── 범용 INFEASIBLE 진단 ──
+    def _diagnose_infeasibility(
+        self, compile_result, solver, elapsed: float
+    ) -> Dict[str, Any]:
+        """
+        INFEASIBLE 판정 시 진단 정보를 생성한다.
+        - compile_result.metadata["constraint_info"]에서 적용된 제약 목록 추출
+        - 솔버 통계(conflicts, branches)로 충돌 규모 추정
+        - hard 제약 간 충돌 가능성을 분석하여 사용자에게 안내
+        """
+        metadata = compile_result.metadata or {}
+        constraint_info = metadata.get("constraint_info", [])
+
+        # 제약조건 분류
+        hard_constraints = [c for c in constraint_info if c.get("category") == "hard"]
+        soft_constraints = [c for c in constraint_info if c.get("category") == "soft"]
+        failed_constraints = [c for c in constraint_info if c.get("count", 0) == 0]
+        applied_constraints = [c for c in constraint_info if c.get("count", 0) > 0]
+
+        # 총 제약 인스턴스 수
+        total_hard_instances = sum(c.get("count", 0) for c in hard_constraints)
+        total_soft_instances = sum(c.get("count", 0) for c in soft_constraints)
+
+        # 솔버 통계
+        solver_stats = {
+            "conflicts": solver.num_conflicts if hasattr(solver, 'num_conflicts') else 0,
+            "branches": solver.num_branches if hasattr(solver, 'num_branches') else 0,
+            "wall_time": solver.wall_time if hasattr(solver, 'wall_time') else elapsed,
+        }
+
+        # 충돌 가능성 분석 (heuristic)
+        conflict_hints = []
+
+        # 고정 인원수 + 총 인원수 제약이 동시에 있으면 충돌 가능성
+        hard_names = {c["name"] for c in hard_constraints if c.get("count", 0) > 0}
+        count_constraints = {n for n in hard_names if "count" in n.lower() or "total" in n.lower()}
+        if len(count_constraints) >= 2:
+            conflict_hints.append({
+                "type": "numeric_conflict",
+                "constraints": list(count_constraints),
+                "message": "인원수/총량 관련 제약이 여러 개 적용되어 있습니다. 값이 서로 모순되지 않는지 확인하세요.",
+            })
+
+        # coverage + assignment 동시 적용 시
+        coverage_constraints = {n for n in hard_names if "coverage" in n.lower() or "assign" in n.lower()}
+        capacity_constraints = {n for n in hard_names if "capacity" in n.lower() or "max" in n.lower() or "limit" in n.lower()}
+        if coverage_constraints and capacity_constraints:
+            conflict_hints.append({
+                "type": "coverage_capacity_conflict",
+                "constraints": list(coverage_constraints | capacity_constraints),
+                "message": "할당 의무 제약과 용량 제한 제약이 동시에 적용되어 있습니다. 자원이 부족하면 충돌합니다.",
+            })
+
+        # 0 conflicts = 전처리 단계에서 바로 infeasible 판정 (명백한 모순)
+        if solver_stats["conflicts"] == 0:
+            conflict_hints.append({
+                "type": "trivial_infeasibility",
+                "message": "솔버가 탐색 없이 즉시 INFEASIBLE을 판정했습니다. 제약조건 값에 명백한 모순이 있을 수 있습니다.",
+            })
+
+        diagnosis = {
+            "summary": {
+                "hard_constraint_count": len(hard_constraints),
+                "hard_instance_count": total_hard_instances,
+                "soft_constraint_count": len(soft_constraints),
+                "soft_instance_count": total_soft_instances,
+                "failed_constraint_count": len(failed_constraints),
+            },
+            "applied_constraints": [
+                {"name": c["name"], "category": c["category"], "count": c["count"]}
+                for c in applied_constraints
+            ],
+            "failed_constraints": [
+                {"name": c["name"], "category": c["category"]}
+                for c in failed_constraints
+            ],
+            "solver_stats": solver_stats,
+            "conflict_hints": conflict_hints,
+        }
+
+        logger.info(
+            f"INFEASIBLE diagnosis: {len(hard_constraints)} hard constraints "
+            f"({total_hard_instances} instances), "
+            f"conflicts={solver_stats['conflicts']}, "
+            f"hints={len(conflict_hints)}"
+        )
+
+        return diagnosis

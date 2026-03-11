@@ -2,8 +2,9 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
 import { useProjectContext } from './ProjectContext';
 import { useEffect } from 'react';
+import type { StageValidation } from '../components/analysis/types';
 
-export type StepId = 'analysis' | 'problem_def' | 'math_model' | 'solver' | 'result';
+export type StepId = 'analysis' | 'problem_def' | 'normalization' | 'math_model' | 'solver' | 'result';
 
 interface StepCache {
   analysis?: any;
@@ -21,6 +22,8 @@ interface AnalysisContextType {
   cacheCurrentStep: () => void;
   switchToStep: (step: StepId) => void;
   completedSteps: Set<StepId>;
+  stageValidation: StageValidation | null;
+  setStageValidation: (v: StageValidation | null) => void;
 }
 
 const AnalysisContext = createContext<AnalysisContextType>({
@@ -30,6 +33,8 @@ const AnalysisContext = createContext<AnalysisContextType>({
   cacheCurrentStep: () => {},
   switchToStep: () => {},
   completedSteps: new Set(),
+  stageValidation: null,
+  setStageValidation: () => {},
 });
 
 function viewModeToStepId(viewMode: string): { stepId: StepId; isFileUpload: boolean } | null {
@@ -54,15 +59,21 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const [analysisData, setAnalysisDataRaw] = useState<any>(null);
   const [stepCache, setStepCache] = useState<StepCache>({});
   const [completedSteps, setCompletedSteps] = useState<Set<StepId>>(new Set());
+  const [stageValidation, setStageValidation] = useState<StageValidation | null>(null);
 
   useEffect(() => {
     setAnalysisDataRaw(null);
     setStepCache({});
     setCompletedSteps(new Set());
+    setStageValidation(null);
   }, [currentProject?.id]);
 
   const setAnalysisData = useCallback((data: any) => {
     setAnalysisDataRaw(data);
+    // Auto-extract validation from incoming data (any stage can include it)
+    if (data?.validation) {
+      setStageValidation(data.validation);
+    }
     if (data && data.view_mode) {
       const mapped = viewModeToStepId(data.view_mode);
       if (mapped) {
@@ -102,6 +113,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     <AnalysisContext.Provider value={{
       analysisData, setAnalysisData, stepCache,
       cacheCurrentStep, switchToStep, completedSteps,
+      stageValidation, setStageValidation,
     }}>
       {children}
     </AnalysisContext.Provider>

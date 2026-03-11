@@ -1,0 +1,33 @@
+# knowledge/domain_aliases.yaml
+# ============================================================
+# 도메인 별칭 → 실제 knowledge pack 이름 매핑
+# 코드에 하드코딩하지 않고 여기서 관리
+# ============================================================
+
+# format: alias → canonical domain name
+aliases:
+  crew: railway
+  train: railway
+  railroad: railway
+  metro: railway
+  subway: railway
+  rail: railway
+
+  flight: aviation
+  airline: aviation
+  airplane: aviation
+
+  bus: bus
+  coach: bus
+
+  delivery: logistics
+  shipping: logistics
+  warehouse: logistics
+  parcel: logistics
+
+  nurse: hospital
+  nursing: hospital
+  ward: hospital
+  clinic: hospital
+
+  # generic fallback은 코드에서 처리

@@ -936,6 +936,7 @@ class StructuralNormalizationSkill:
             _constraint_keywords = [
                 "시간", "time", "분", "min", "준비", "정리", "대기",
                 "휴식", "수면", "취침", "출고", "퇴근", "교육",
+                "주간", "야간", "인원", "사업", "근무", "crew", "shift",
             ]
             filtered_params = []
             for p in all_params:
@@ -944,6 +945,11 @@ class StructuralNormalizationSkill:
                 pname = p.get("param_name", "")
                 # param_type이 있거나 context가 있으면 유효 파라미터
                 if ptype or ctx:
+                    filtered_params.append(p)
+                    continue
+                # 시맨틱 매핑에 성공한 파라미터는 유지 (원래 이름과 다르면 매핑된 것)
+                sid = p.get("semantic_id", "")
+                if sid and sid != pname:
                     filtered_params.append(p)
                     continue
                 # param_type/context 없어도 이름에 제약조건 키워드 있으면 유지

@@ -7,3 +7,6 @@ export { OptimizationResultView } from './OptimizationResultView';
 export { StepItem } from './StepItem';
 export { ProblemDefinitionView } from './ProblemDefinitionView';
 export { NormalizationView } from './NormalizationView';
+export { default as ValidationDrawer } from './ValidationDrawer';
+export { default as VersionBar } from './VersionBar';
+export { default as VersionCompareView } from './VersionCompareView';

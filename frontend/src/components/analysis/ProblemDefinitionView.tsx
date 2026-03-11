@@ -288,9 +288,11 @@ export function ProblemDefinitionView({
               <p className="text-xs text-slate-500 mb-1">{'대안:'}</p>
               <div className="flex gap-2 flex-wrap">
                 {objective.alternatives.map((alt: any, i: number) => (
-                  <span key={i} className="px-2 py-0.5 text-xs bg-slate-700 text-slate-400 rounded-full">
+                  <button key={i}
+                    onClick={() => onAction?.('send', `목적함수를 ${alt.description || alt.target}으로 변경`)}
+                    className="px-2 py-0.5 text-xs bg-slate-700 text-slate-400 rounded-full hover:bg-indigo-500/30 hover:text-indigo-300 transition-colors cursor-pointer">
                     {alt.description || alt.target}
-                  </span>
+                  </button>
                 ))}
               </div>
             </div>

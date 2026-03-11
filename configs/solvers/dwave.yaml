@@ -82,22 +82,52 @@ solvers:
       scaling_factor: 1.0
       max_time_seconds: 5
 
+  - id: dwave_advantage2_qpu
+    name: Advantage2 QPU (Zephyr)
+    description: 4400+ 큐빗 Zephyr 토폴로지 양자 처리 장치 (2세대)
+    category: quantum_native
+    model_type: BQM
+    supported_variable_types: [binary, spin]
+    supports_constraints: false
+    max_variables: 4400
+    max_constraints: 0
+    problem_classes: [QUBO, ising, small_optimization]
+    strengths:
+      - Zephyr 토폴로지 (degree 20, 연결성 33% 향상)
+      - 노이즈 75% 감소, 코히어런스 2배 향상
+      - 에너지 스케일 40% 증가
+      - 짧은 임베딩 체인 → 실효 변수 수 증가
+    weaknesses:
+      - 실효 변수 수 제한적 (~300, 임베딩 후)
+      - 제약조건은 페널티로 변환 필요
+    solution_guarantee: heuristic
+    cost_per_minute: 0.33
+    time_profile:
+      reference_variables: 100
+      base_time_seconds: [0.01, 0.1]
+      scaling_model: linear
+      scaling_factor: 1.0
+      max_time_seconds: 5
+
   - id: dwave_nl
-    name: Nonlinear Model Solver
-    description: 비선형 모델을 지원하는 하이브리드 솔버 (순열, 부분집합 등)
+    name: Stride (NL Hybrid Solver)
+    description: D-Wave 전략적 주력 하이브리드 솔버 — 순열, 부분집합, 비선형 모델 네이티브 지원 (200만 변수)
     category: quantum_hybrid
     model_type: NL
-    supported_variable_types: [binary, integer]
+    supported_variable_types: [binary, integer, continuous]
     supports_constraints: true
-    max_variables: 1000000
-    max_constraints: 100000
-    problem_classes: [scheduling, TSP, permutation, subset_selection]
+    max_variables: 2000000
+    max_constraints: 2000000
+    problem_classes: [scheduling, TSP, permutation, subset_selection, resource_allocation, routing]
     strengths:
-      - 순열/부분집합 네이티브 지원
+      - 순열/부분집합 네이티브 지원 (QUBO 변환 불필요)
       - 비선형 목적함수 지원
+      - 200만 변수/제약 지원 (CQM의 20배)
+      - 연속 변수 + 선형 상호작용 지원 (2025~)
+      - 서로게이트 모델링 (ML 통합 최적화)
     weaknesses:
-      - 연속 변수 미지원
-      - 비교적 새로운 모델 타입
+      - 최적해 보장 불가 (근사해)
+      - 클라우드 비용 발생
     solution_guarantee: approximate
     cost_per_minute: 0.20
     time_profile:

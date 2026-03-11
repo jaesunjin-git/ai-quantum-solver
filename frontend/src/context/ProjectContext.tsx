@@ -1,6 +1,5 @@
 import { createContext, useContext, useState, useEffect, type ReactNode, useCallback } from 'react';
 import { useAuth } from './AuthContext';
-// 🌟 [중요] 아까 만든 config.ts에서 주소를 가져옵니다.
 import { API_BASE_URL } from '../config';
 
 export interface Project {
@@ -27,37 +26,31 @@ export const ProjectProvider: React.FC<{ children: ReactNode }> = ({ children })
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  const { user } = useAuth();
+  const { user, token } = useAuth();
 
   const fetchProjects = useCallback(async () => {
-    if (!user) return; // 로그인 안 했으면 중단
+    if (!user || !token) return;
 
     setIsLoading(true);
     try {
-      // 🌟 [핵심] URL 조립: config의 주소 + user 파라미터 (인코딩 필수)
-      // 예: http://127.0.0.1:8000/api/projects?user=Super%20Admin
-      const url = `${API_BASE_URL}/api/projects?user=${encodeURIComponent(user.name)}`;
-      
-      console.log(`📡 [API Request] Getting projects from: ${url}`);
+      const url = `${API_BASE_URL}/api/projects`;
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
-      const response = await fetch(url);
-      
       if (response.ok) {
         const data = await response.json();
-        console.log("✅ [API Success] Projects loaded:", data);
         setProjects(data);
       } else {
-        const errorText = await response.text();
-        console.error(`❌ [API Error] Status: ${response.status}`, errorText);
+        console.error(`[API Error] Status: ${response.status}`);
       }
     } catch (error) {
-      console.error("❌ [Network Error]", error);
+      console.error('[Network Error]', error);
     } finally {
       setIsLoading(false);
     }
-  }, [user]);
+  }, [user, token]);
 
-  // user 정보가 생기면(로그인하면) 자동으로 목록 가져오기
   useEffect(() => {
     if (user) {
       fetchProjects();
@@ -67,12 +60,12 @@ export const ProjectProvider: React.FC<{ children: ReactNode }> = ({ children })
   }, [user, fetchProjects]);
 
   return (
-    <ProjectContext.Provider value={{ 
-        projects, 
-        currentProject, 
-        setCurrentProject, 
+    <ProjectContext.Provider value={{
+        projects,
+        currentProject,
+        setCurrentProject,
         refreshProjects: fetchProjects,
-        isLoading 
+        isLoading
     }}>
       {children}
     </ProjectContext.Provider>

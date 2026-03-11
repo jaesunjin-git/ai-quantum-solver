@@ -1,0 +1,98 @@
+# cross_rules.yaml — Railway domain parameter cross-validation rules
+#
+# Format:
+#   Each rule has:
+#     - id: unique identifier
+#     - description: Korean user-facing message
+#     - condition: expression evaluated with parameter values
+#                  Supports: <, <=, >, >=, ==, !=, +, -, *, /
+#     - severity: error | warning
+#     - suggestion: fix recommendation
+#     - auto_fix: optional { param, action, expression }
+#
+# Available operators in expressions:
+#   - param references: ${param_name}
+#   - arithmetic: +, -, *, /
+#   - comparison: <, <=, >, >=, ==, !=
+#
+# Rules are evaluated top-down; all rules run independently.
+
+rules:
+  - id: driving_le_work
+    description: "최대 운전시간이 최대 근무시간을 초과합니다"
+    condition: "${max_driving_minutes} <= ${max_work_minutes}"
+    severity: error
+    suggestion: "운전시간은 근무시간 이내여야 합니다. 운전시간을 줄이거나 근무시간을 늘려 주세요."
+    auto_fix:
+      param: max_driving_minutes
+      action: cap_to
+      expression: "${max_work_minutes}"
+      label: "운전시간을 근무시간 이하로 조정"
+
+  - id: break_fits_in_work
+    description: "최소 휴식시간 + 최대 운전시간이 최대 근무시간을 초과합니다"
+    condition: "${min_break_minutes} + ${max_driving_minutes} <= ${max_work_minutes}"
+    severity: warning
+    suggestion: "휴식시간과 운전시간의 합이 근무시간 내에 들어가야 합니다."
+
+  - id: wait_le_work
+    description: "최대 대기시간이 최대 근무시간을 초과합니다"
+    condition: "${max_wait_minutes} <= ${max_work_minutes}"
+    severity: warning
+    suggestion: "대기시간이 근무시간보다 길 수 없습니다."
+    auto_fix:
+      param: max_wait_minutes
+      action: cap_to
+      expression: "${max_work_minutes}"
+      label: "대기시간을 근무시간 이하로 조정"
+
+  - id: prep_cleanup_within_work
+    description: "준비시간 + 정리시간이 근무시간의 절반을 초과합니다"
+    condition: "${preparation_minutes} + ${cleanup_minutes} <= ${max_work_minutes} / 2"
+    severity: warning
+    suggestion: "준비/정리시간이 과도합니다. 값을 확인해 주세요."
+
+  - id: meal_break_ge_min_break
+    description: "식사 휴식시간이 최소 휴식시간보다 짧습니다"
+    condition: "${min_meal_break_minutes} >= ${min_break_minutes}"
+    severity: warning
+    suggestion: "식사 휴식은 최소 휴식시간 이상이어야 합니다."
+    auto_fix:
+      param: min_meal_break_minutes
+      action: set
+      expression: "${min_break_minutes}"
+      label: "식사 휴식을 최소 휴식시간으로 설정"
+
+  - id: night_start_after_day_end
+    description: "야간 시작 시각이 주간 종료 시각보다 빠릅니다"
+    condition: "${night_duty_start_earliest} >= ${day_duty_end_latest} - 360"
+    severity: warning
+    suggestion: "야간 시작과 주간 종료 사이에 충분한 간격이 필요합니다."
+
+  - id: avg_driving_le_max_driving
+    description: "평균 운전시간 목표가 최대 운전시간을 초과합니다"
+    condition: "${avg_driving_target_minutes} <= ${max_driving_minutes}"
+    severity: error
+    suggestion: "평균 목표는 최대값 이하여야 합니다."
+    auto_fix:
+      param: avg_driving_target_minutes
+      action: cap_to
+      expression: "${max_driving_minutes}"
+      label: "평균 목표를 최대 운전시간 이하로 조정"
+
+  - id: night_rest_ge_break
+    description: "야간 최소 수면시간이 최소 휴식시간보다 짧습니다"
+    condition: "${min_night_sleep_minutes} >= ${min_break_minutes}"
+    severity: error
+    suggestion: "야간 수면시간은 최소 휴식시간 이상이어야 합니다."
+
+  - id: max_stay_ge_work
+    description: "최대 체류시간이 최대 근무시간보다 짧습니다"
+    condition: "${max_total_stay_minutes} >= ${max_work_minutes}"
+    severity: warning
+    suggestion: "체류시간은 근무시간 이상이어야 합니다."
+    auto_fix:
+      param: max_total_stay_minutes
+      action: set
+      expression: "${max_work_minutes}"
+      label: "체류시간을 근무시간으로 설정"

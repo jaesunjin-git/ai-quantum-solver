@@ -1,0 +1,157 @@
+# result_mapping.yaml — Railway domain result interpretation config
+#
+# Externalizes objective patterns, constraint labels, solution variable
+# semantics, and KPI definitions so the interpreter can be data-driven.
+
+# ── Objective classification ──
+objective_types:
+  duty_count_min:
+    patterns: ["sum(u[", "minimize.*u[", "min.*duty"]
+    label_ko: "듀티 수 최소화"
+    label_en: "Minimize Duty Count"
+  cost_min:
+    patterns: ["cost", "비용", "expense"]
+    label_ko: "비용 최소화"
+    label_en: "Minimize Cost"
+  wait_min:
+    patterns: ["wait", "대기", "idle"]
+    label_ko: "대기시간 최소화"
+    label_en: "Minimize Wait Time"
+  time_min:
+    patterns: ["time", "시간", "duration"]
+    label_ko: "운행시간 최소화"
+    label_en: "Minimize Time"
+
+default_objective_label_ko: "목적함수 최적화"
+default_objective_label_en: "Optimization Result"
+
+# ── Solution variable semantics ──
+# Maps solver output variable names to their roles
+solution_variables:
+  activation:
+    key: "y"
+    description: "듀티(승무원) 활성화 여부"
+    type: binary
+  assignment:
+    key: "x"
+    description: "트립→듀티 배정"
+    type: binary
+    indices: [trip, duty]
+  start_time:
+    key: "z"
+    description: "듀티 시작 시각 (분)"
+    type: continuous
+  end_time:
+    key: "w"
+    description: "듀티 종료 시각 (분)"
+    type: continuous
+
+# ── Primary entity (what the solution "produces") ──
+entity:
+  name: "duty"
+  label_ko: "듀티"
+  label_en: "Duty"
+  data_file: "normalized/trips.csv"
+  data_fallback: "phase1/timetable_rows.csv"
+  id_column: "trip_id"
+  time_columns:
+    departure: "trip_dep_time"
+    arrival: "trip_arr_time"
+    duration: "trip_duration"
+  display_columns:
+    - { field: "direction", label: "방향" }
+    - { field: "dep_station", label: "출발역" }
+    - { field: "arr_station", label: "도착역" }
+
+# ── Parameter defaults (used when parameters.csv is unavailable) ──
+parameter_defaults:
+  prep_time_minutes: 40
+  cleanup_time_minutes: 30
+  max_driving_minutes: 360
+  max_work_minutes: 660
+  max_total_stay_minutes: 720
+
+# ── Constraint labels (Korean display names) ──
+constraint_labels:
+  hard:
+    trip_coverage: "트립 커버리지"
+    crew_activation_linking: "승무원 활성화 연결"
+    no_overlap: "트립 중복 금지"
+    max_driving_time: "운전시간 상한"
+    max_work_time: "근무시간 상한"
+    max_wait_time: "대기시간 상한"
+    preparation_time: "준비시간"
+    cleanup_time: "정리시간"
+    mandatory_break: "의무 휴식"
+    meal_break_guarantee: "식사 휴식 보장"
+  soft:
+    avg_driving_time_target: "평균 운전시간 목표"
+    avg_wait_time_target: "평균 대기시간 목표"
+    max_total_stay_time: "최대 체류시간"
+    night_duty_start_preferred: "야간 시작 권고"
+    post_arrival_rest: "도착 후 휴식"
+    post_shift_training: "교대 후 훈련"
+    workload_balance: "업무량 균형"
+    day_duty_start: "주간 시작 시각"
+    day_duty_end: "주간 종료 시각"
+    night_duty_start: "야간 시작 시각"
+    day_night_classification: "주야 분류"
+    night_sleep_guarantee: "야간 수면 보장"
+    night_rest: "야간 휴식"
+
+# ── KPI definitions ──
+# These define what KPIs are shown in the result dashboard
+kpi:
+  core:
+    - id: active_duties
+      label_ko: "활성 듀티 수"
+      unit: "개"
+    - id: total_trips
+      label_ko: "전체 트립 수"
+      unit: "개"
+    - id: covered_trips
+      label_ko: "배정된 트립 수"
+      unit: "개"
+    - id: coverage_rate
+      label_ko: "커버리지율"
+      unit: "%"
+  efficiency:
+    - id: avg_trips_per_duty
+      label_ko: "듀티당 평균 트립"
+      unit: "개"
+    - id: driving_efficiency
+      label_ko: "운전 효율"
+      unit: "%"
+    - id: avg_driving_per_duty
+      label_ko: "듀티당 평균 운전시간"
+      unit: "분"
+    - id: avg_idle_per_duty
+      label_ko: "듀티당 평균 대기시간"
+      unit: "분"
+  objective_specific:
+    duty_count_min:
+      - id: duty_reduction_vs_trips
+        label_ko: "듀티 절감률"
+        unit: "%"
+      - id: earliest_start
+        label_ko: "최초 시작 시각"
+        unit: "HH:MM"
+      - id: latest_end
+        label_ko: "최종 종료 시각"
+        unit: "HH:MM"
+
+# ── Artifact definitions ──
+artifacts:
+  - id: solution
+    filename_template: "solution_{solver_id}.json"
+    format: json
+  - id: interpretation
+    filename_template: "interpretation_{solver_id}.json"
+    format: json
+  - id: duty_schedule
+    filename_template: "duty_schedule_{solver_id}.csv"
+    format: csv
+    description: "듀티-트립 배정표"
+  - id: kpi
+    filename_template: "kpi_{solver_id}.json"
+    format: json

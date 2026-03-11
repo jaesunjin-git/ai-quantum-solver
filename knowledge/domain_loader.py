@@ -7,6 +7,11 @@ YAML 구조:
 
 DomainKnowledge는 두 형식 모두 지원하며,
 외부 인터페이스(dk.hard_constraints, dk.soft_constraints)는 동일하게 유지.
+
+v4 추가:
+  - resolve_domain_alias(): domain_aliases.yaml 기반 별칭 해석
+  - validate_knowledge_pack(): 필수 파일 존재 여부 검증
+  - get_domain_profile(): domain_profiles.yaml 로딩
 """
 import logging
 from dataclasses import dataclass, field
@@ -245,7 +250,16 @@ def load_domain_knowledge(domain_name: str, force_reload: bool = False) -> Domai
     # 방법 1: 폴더 구조
     folder = domains_dir / domain_name
     if folder.is_dir():
-        dk.index = _safe_load_yaml(folder / "_index.yaml")
+        raw_index = _safe_load_yaml(folder / "_index.yaml")
+        # _index.yaml이 "domain:" 래퍼로 감싸져 있으면 풀어서 사용
+        if "domain" in raw_index and isinstance(raw_index["domain"], dict):
+            dk.index = raw_index["domain"]
+            # 최상위 키도 병합 (problem_variants, stages 등)
+            for k, v in raw_index.items():
+                if k != "domain" and k not in dk.index:
+                    dk.index[k] = v
+        else:
+            dk.index = raw_index
         raw_constraints = _safe_load_yaml(folder / "constraints.yaml")
         dk.templates = _safe_load_yaml(folder / "templates.yaml")
         dk.reference_ranges = _safe_load_yaml(folder / "reference_ranges.yaml")
@@ -362,3 +376,110 @@ def list_available_domains() -> List[str]:
         elif entry.is_file() and entry.suffix == ".yaml":
             result.add(entry.stem)
     return sorted(result)
+
+
+# ── 도메인 별칭 해석 (v4) ──
+_alias_cache: Optional[Dict[str, str]] = None
+
+
+def _load_aliases() -> Dict[str, str]:
+    """domain_aliases.yaml 로드 (캐시)."""
+    global _alias_cache
+    if _alias_cache is not None:
+        return _alias_cache
+    alias_file = _BASE / "domain_aliases.yaml"
+    raw = _safe_load_yaml(alias_file)
+    _alias_cache = raw.get("aliases", {})
+    return _alias_cache
+
+
+def resolve_domain_alias(name: str) -> str:
+    """
+    도메인 별칭을 실제 knowledge pack 이름으로 변환.
+    이미 실제 이름이면 그대로 반환.
+
+    예: 'crew' -> 'railway', 'flight' -> 'aviation'
+    """
+    aliases = _load_aliases()
+    return aliases.get(name.lower(), name)
+
+
+# ── Knowledge Pack 검증 (v4) ──
+
+def validate_knowledge_pack(domain_name: str) -> Dict:
+    """
+    도메인 knowledge pack의 필수/선택 파일 존재 여부 검증.
+
+    Returns:
+        {
+            "valid": bool,
+            "domain": str,
+            "has_folder": bool,
+            "files": {"_index.yaml": True, "constraints.yaml": True, ...},
+            "missing_required": ["constraints.yaml"],
+            "warnings": ["templates.yaml not found (optional)"],
+        }
+    """
+    canonical = resolve_domain_alias(domain_name)
+    folder = _BASE / "domains" / canonical
+    result = {
+        "valid": False,
+        "domain": canonical,
+        "has_folder": folder.is_dir(),
+        "files": {},
+        "missing_required": [],
+        "warnings": [],
+    }
+
+    if not folder.is_dir():
+        # 단일 파일 체크
+        single = _BASE / "domains" / f"{canonical}.yaml"
+        if single.exists():
+            result["files"]["single_yaml"] = True
+            result["valid"] = True
+        else:
+            result["missing_required"].append("knowledge pack folder or single YAML")
+        return result
+
+    required_files = ["_index.yaml", "constraints.yaml"]
+    optional_files = ["templates.yaml", "reference_ranges.yaml", "cross_rules.yaml", "result_mapping.yaml"]
+
+    for f in required_files:
+        exists = (folder / f).exists()
+        result["files"][f] = exists
+        if not exists:
+            result["missing_required"].append(f)
+
+    for f in optional_files:
+        exists = (folder / f).exists()
+        result["files"][f] = exists
+        if not exists:
+            result["warnings"].append(f"{f} not found (optional)")
+
+    result["valid"] = len(result["missing_required"]) == 0
+    return result
+
+
+# ── 도메인 프로필 로딩 (v4) ──
+_profiles_cache: Optional[Dict] = None
+
+
+def get_domain_profile(domain_name: str) -> Dict:
+    """
+    domain_profiles.yaml에서 해당 도메인 프로필 반환.
+    terminology, typical_constraints, regulations 등 포함.
+    """
+    global _profiles_cache
+    if _profiles_cache is None:
+        _profiles_cache = _safe_load_yaml(_BASE / "domain_profiles.yaml")
+
+    canonical = resolve_domain_alias(domain_name)
+    return _profiles_cache.get(canonical, {})
+
+
+def list_domain_profiles() -> Dict[str, Dict]:
+    """모든 도메인 프로필 반환."""
+    global _profiles_cache
+    if _profiles_cache is None:
+        _profiles_cache = _safe_load_yaml(_BASE / "domain_profiles.yaml")
+    return _profiles_cache

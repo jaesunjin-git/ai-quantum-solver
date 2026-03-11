@@ -161,7 +161,44 @@ class SolverPipeline:
         except Exception as g3e:
             logger.warning(f"Gate3 check failed (non-blocking): {g3e}")
 
-        #  Phase 3: Execute 
+        # ── Stage 5 validation (presolve) ──
+        try:
+            from engine.validation.registry import get_registry
+            registry = get_registry()
+
+            # Build compile_summary for validators
+            total_constraints_in_model = len(math_model.get("constraints", []))
+            failed_c = len([w for w in (compile_result.warnings or []) if "all parse methods failed" in str(w).lower()])
+            stage5_ctx = {
+                "compile_summary": {
+                    "variables_created": compile_result.variable_count,
+                    "constraints": {
+                        "total_in_model": total_constraints_in_model,
+                        "applied": total_constraints_in_model - failed_c,
+                        "failed": failed_c,
+                    },
+                    "objective_parsed": True,
+                    "warnings": compile_result.warnings or [],
+                },
+                "model_stats": {
+                    "total_variables": compile_result.variable_count,
+                    "total_constraints": compile_result.constraint_count,
+                },
+                "math_model": math_model,
+                "warnings": compile_result.warnings or [],
+            }
+            stage5_result = registry.run_stage(5, stage5_ctx)
+            if stage5_result.items:
+                # Store for inclusion in final summary
+                self._stage5_validation = stage5_result.to_dict()
+                logger.info(
+                    f"Stage5 validation: errors={stage5_result.error_count}, "
+                    f"warnings={stage5_result.warning_count}"
+                )
+        except Exception as e:
+            logger.warning(f"Stage 5 validation failed: {e}")
+
+        #  Phase 3: Execute
         try:
             executor = get_executor(compile_result.solver_type)
             logger.info(f"Executor: {type(executor).__name__}")
@@ -274,6 +311,7 @@ class SolverPipeline:
         execute_summary = {
             "status": execute_result.status,
             "objective_value": execute_result.objective_value,
+            "best_bound": execute_result.best_bound,
             "execute_time_sec": execute_result.execution_time_sec,
             "nonzero_variables": nonzero,
             "solver_info": execute_result.solver_info,
@@ -285,6 +323,7 @@ class SolverPipeline:
             "solver_type": compile_result.solver_type,
             "status": execute_result.status,
             "objective_value": execute_result.objective_value,
+            "best_bound": execute_result.best_bound,
 
             "model_stats": {
                 "total_variables": compile_result.variable_count,
@@ -323,12 +362,49 @@ class SolverPipeline:
                     status=execute_result.status,
                     objective_value=execute_result.objective_value,
                 )
-                saved = save_artifacts(project_dir, execute_result.solution, interpreted, solver_id)
+                saved = save_artifacts(
+                    project_dir, execute_result.solution, interpreted, solver_id,
+                    domain=math_model.get("domain", "railway"),
+                )
                 summary["interpreted_result"] = interpreted
                 summary["artifacts"] = {k: str(v) for k, v in saved.items()}
                 logger.info(f"Result interpreted: {interpreted['objective_label']}, artifacts={list(saved.keys())}")
         except Exception as e:
             logger.warning(f"Result interpretation failed: {e}")
+
+        # ── Stage 6 validation (post-solve) ──
+        try:
+            from engine.validation.registry import get_registry
+            registry = get_registry()
+            stage6_ctx = {
+                "status": execute_result.status,
+                "objective_value": execute_result.objective_value,
+                "best_bound": execute_result.best_bound,
+                "solution": execute_result.solution,
+                "math_model": math_model,
+                "interpreted_result": summary.get("interpreted_result", {}),
+                "execution_time_sec": execute_result.execution_time_sec,
+                "compile_summary": summary.get("compile_summary", {}),
+                "domain": math_model.get("domain", ""),
+            }
+            stage6_result = registry.run_stage(6, stage6_ctx)
+            validation = stage6_result.to_dict()
+
+            # Merge Stage 5 presolve findings into the validation response
+            stage5 = getattr(self, "_stage5_validation", None)
+            if stage5 and stage5.get("items"):
+                validation["items"] = stage5["items"] + validation["items"]
+                validation["error_count"] += stage5.get("error_count", 0)
+                validation["warning_count"] += stage5.get("warning_count", 0)
+                validation["info_count"] += stage5.get("info_count", 0)
+                validation["validators_run"] = stage5.get("validators_run", []) + validation["validators_run"]
+                if stage5.get("blocking"):
+                    validation["blocking"] = True
+                    validation["passed"] = False
+
+            summary["validation"] = validation
+        except Exception as e:
+            logger.warning(f"Post-solve validation failed: {e}")
 
         return summary
 

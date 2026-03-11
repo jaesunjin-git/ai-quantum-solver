@@ -558,7 +558,7 @@ def run(math_model: Dict,
                 )
         
         # 검증2: sum의 coeff에 param이 있는데 해당 param의 source_file이 비정형 원본인 경우
-        if isinstance(lhs, dict) and "sum" in lhs:
+        if isinstance(lhs, dict) and "sum" in lhs and isinstance(lhs["sum"], dict):
             coeff = lhs["sum"].get("coeff")
             if isinstance(coeff, dict) and "param" in coeff:
                 param_ref = coeff["param"]

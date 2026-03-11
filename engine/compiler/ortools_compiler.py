@@ -9,19 +9,28 @@ from .expression_parser import parse_and_apply_expression
 logger = logging.getLogger(__name__)
 
 
-# ★ NEW: soft constraint weight 로딩
-def _load_soft_weights() -> Dict[str, float]:
-    """constraints.yaml에서 soft constraint의 weight 값을 로딩"""
+# ── soft constraint weight 캐싱 ──
+_soft_weights_cache: Optional[Dict[str, float]] = None
+
+
+def _load_soft_weights(force_reload: bool = False) -> Dict[str, float]:
+    """constraints.yaml에서 soft constraint의 weight 값을 로딩 (모듈 레벨 캐시)"""
+    global _soft_weights_cache
+    if _soft_weights_cache is not None and not force_reload:
+        return _soft_weights_cache
+
     import os
     try:
         import yaml
     except ImportError:
-        return {}
+        _soft_weights_cache = {}
+        return _soft_weights_cache
     base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     domains_dir = os.path.join(base, "knowledge", "domains")
-    weights = {}
+    weights: Dict[str, float] = {}
     if not os.path.isdir(domains_dir):
-        return weights
+        _soft_weights_cache = weights
+        return _soft_weights_cache
     for dname in os.listdir(domains_dir):
         cpath = os.path.join(domains_dir, dname, "constraints.yaml")
         if not os.path.isfile(cpath):
@@ -31,10 +40,20 @@ def _load_soft_weights() -> Dict[str, float]:
                 cdata = yaml.safe_load(f) or {}
         except Exception:
             continue
-        for cid, cdef in (cdata.get("soft") or {}).items():
+        # v3 format: constraints → {id: {default_category: soft, weight: ...}}
+        # legacy format: soft → {id: {weight: ...}}
+        constraints = cdata.get("constraints") or {}
+        soft_section = cdata.get("soft") or {}
+        # v3: constraints 딕셔너리에서 soft 카테고리 추출
+        for cid, cdef in constraints.items():
+            if isinstance(cdef, dict) and cdef.get("default_category") == "soft":
+                weights[cid] = float(cdef.get("weight", 1.0))
+        # legacy fallback
+        for cid, cdef in soft_section.items():
             if isinstance(cdef, dict):
                 weights[cid] = float(cdef.get("weight", 1.0))
-    return weights
+    _soft_weights_cache = weights
+    return _soft_weights_cache
 
 
 class ORToolsCompiler(BaseCompiler):
@@ -130,7 +149,7 @@ class ORToolsCompiler(BaseCompiler):
                 logger.warning(f"overlap_pairs.json not found at {_op_path}")
         # --- end overlap_pairs ---
 
-        ctx = BuildContext(var_map, param_map, set_map)
+        ctx = BuildContext(var_map, param_map, set_map, model=model)
 
         logger.info(f"BuildContext - sets: {list(set_map.keys())}, sizes: {[len(v) for v in set_map.values()]}")
         logger.info(f"BuildContext - params: {list(param_map.keys())[:20]}")
@@ -138,6 +157,7 @@ class ORToolsCompiler(BaseCompiler):
 
         total_constraints = 0
         constraint_defs = math_model.get("constraints", [])
+        constraint_info = []  # 적용된 제약조건 메타 [(name, category, count, method)]
 
         # ★ NEW: soft constraint 처리를 위한 준비
         soft_weights = _load_soft_weights()
@@ -171,8 +191,10 @@ class ORToolsCompiler(BaseCompiler):
                     total_constraints += slack_count
                     soft_slack_vars.extend(slack_entries)
                     soft_applied_count += 1
+                    constraint_info.append({"name": cname, "category": "soft", "count": slack_count, "method": "soft_slack"})
                     logger.info(f"Soft constraint '{cname}': {slack_count} instances applied")
                 else:
+                    constraint_info.append({"name": cname, "category": "soft", "count": 0, "method": "skipped"})
                     warnings.append(f"Soft constraint {cname}: could not apply, skipped")
                 continue
 
@@ -209,6 +231,7 @@ class ORToolsCompiler(BaseCompiler):
                     )
                     if parsed_count > 0:
                         total_constraints += parsed_count
+                        constraint_info.append({"name": cname, "category": category, "count": parsed_count, "method": "expression_parser"})
                         logger.info(f"Constraint '{cname}': {parsed_count} instances (expression_parser)")
                         continue
                 except Exception as e:
@@ -226,6 +249,7 @@ class ORToolsCompiler(BaseCompiler):
                     if parsed_count > 0:
                         logger.info(f"Constraint '{cname}': {parsed_count} instances (structured)")
                         total_constraints += parsed_count
+                        constraint_info.append({"name": cname, "category": category, "count": parsed_count, "method": "structured"})
                         continue
                     else:
                         logger.warning(f"Constraint '{cname}' FAILED structured - lhs={json.dumps(con_def.get('lhs'), ensure_ascii=False, default=str)[:300]}")
@@ -239,8 +263,10 @@ class ORToolsCompiler(BaseCompiler):
             parsed_count = self._parse_constraint_cpsat_legacy(model, var_map, con_def, bound_data)
             if parsed_count > 0:
                 total_constraints += parsed_count
+                constraint_info.append({"name": cname, "category": category, "count": parsed_count, "method": "legacy_regex"})
                 logger.info(f"Constraint '{cname}': {parsed_count} instances (legacy regex)")
             else:
+                constraint_info.append({"name": cname, "category": category, "count": 0, "method": "failed"})
                 warnings.append(f"Constraint {cname}: all parse methods failed: {expr[:80]}")
 
         logger.info(f"CP-SAT: created {total_constraints} constraints (soft applied: {soft_applied_count})")
@@ -265,8 +291,9 @@ class ORToolsCompiler(BaseCompiler):
             metadata={
                 "model_type": "CP-SAT",
                 "engine": "ortools",
-                "soft_constraints_applied": soft_applied_count,       # ★ NEW
-                "soft_slack_variables": len(soft_slack_vars),          # ★ NEW
+                "soft_constraints_applied": soft_applied_count,
+                "soft_slack_variables": len(soft_slack_vars),
+                "constraint_info": constraint_info,
             },
         )
 
@@ -286,8 +313,9 @@ class ORToolsCompiler(BaseCompiler):
         cname = con_def.get("name", con_def.get("id", "unknown"))
         has_struct = con_def.get("lhs") is not None and con_def.get("rhs") is not None
 
+        # lhs/rhs 구조가 없으면 expression 기반으로 시도
         if not has_struct:
-            return None
+            return self._apply_soft_constraint_cpsat_expr(model, con_def, ctx, var_map, soft_weights)
 
         # weight 결정: constraint 정의 > YAML > 기본값 1.0
         weight = float(con_def.get("weight", soft_weights.get(cname, 1.0)))
@@ -356,6 +384,81 @@ class ORToolsCompiler(BaseCompiler):
         if constraint_count > 0:
             logger.info(
                 f"Soft constraint '{cname}': {constraint_count} instances, "
+                f"weight={weight}, scaled_weight={slack_entries[0][1] if slack_entries else 'N/A'}"
+            )
+            return (constraint_count, slack_entries)
+
+        return None
+
+    def _apply_soft_constraint_cpsat_expr(self, model, con_def, ctx, var_map, soft_weights):
+        """
+        expression 문자열 기반 soft constraint 처리.
+        expression_parser의 _parse_for_each / _eval_expr를 재사용하여
+        lhs_val, rhs_val을 구한 뒤 슬랙 변수를 삽입.
+        """
+        from engine.compiler.expression_parser import _parse_for_each, _eval_expr
+
+        cname = con_def.get("name", con_def.get("id", "unknown"))
+        expr_str = con_def.get("expression", "").strip()
+        for_each_str = con_def.get("for_each", "")
+
+        if not expr_str:
+            return None
+
+        # 비교 연산자 분리
+        orig_op = None
+        lhs_str = rhs_str = ""
+        for op in ["<=", ">=", "=="]:
+            if op in expr_str:
+                parts = expr_str.split(op, 1)
+                lhs_str, rhs_str = parts[0].strip(), parts[1].strip()
+                orig_op = op
+                break
+        if orig_op is None:
+            logger.warning(f"Soft constraint '{cname}': no comparison operator in expression")
+            return None
+
+        weight = float(con_def.get("weight", soft_weights.get(cname, 1.0)))
+        MAX_SLACK = 1440
+        NORMALIZE = 300
+
+        bindings = _parse_for_each(for_each_str, ctx)
+        slack_entries = []
+        constraint_count = 0
+
+        for idx, binding in enumerate(bindings):
+            try:
+                lhs_val = _eval_expr(lhs_str, binding, ctx, var_map, model)
+                rhs_val = _eval_expr(rhs_str, binding, ctx, var_map, model)
+
+                if lhs_val is None or rhs_val is None:
+                    continue
+                if isinstance(lhs_val, float):
+                    lhs_val = int(lhs_val)
+                if isinstance(rhs_val, float):
+                    rhs_val = int(rhs_val)
+
+                slack = model.new_int_var(0, MAX_SLACK, f"slack_{cname}_{idx}")
+
+                if orig_op in ("<=", "<"):
+                    model.Add(lhs_val - slack <= rhs_val)
+                elif orig_op in (">=", ">"):
+                    model.Add(lhs_val + slack >= rhs_val)
+                elif orig_op == "==":
+                    model.Add(lhs_val <= rhs_val + slack)
+                    model.Add(lhs_val >= rhs_val - slack)
+
+                scaled_weight = max(1, int(weight * 100 / NORMALIZE))
+                slack_entries.append((slack, scaled_weight))
+                constraint_count += 1
+
+            except Exception as e:
+                logger.debug(f"Soft constraint '{cname}' expr idx={idx} failed: {e}")
+                continue
+
+        if constraint_count > 0:
+            logger.info(
+                f"Soft constraint '{cname}' (expr): {constraint_count} instances, "
                 f"weight={weight}, scaled_weight={slack_entries[0][1] if slack_entries else 'N/A'}"
             )
             return (constraint_count, slack_entries)
@@ -483,7 +586,7 @@ class ORToolsCompiler(BaseCompiler):
                 logger.warning(f"LP overlap_pairs.json not found at {_op_path}")
         # --- end LP overlap_pairs ---
 
-        ctx = BuildContext(var_map, param_map, set_map)
+        ctx = BuildContext(var_map, param_map, set_map, model=solver)
 
         logger.info(f"BuildContext - sets: {list(set_map.keys())}, sizes: {[len(v) for v in set_map.values()]}")
         logger.info(f"BuildContext - params: {list(param_map.keys())[:20]}")

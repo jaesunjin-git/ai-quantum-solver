@@ -1,0 +1,108 @@
+domain:
+  name: logistics
+  name_ko: 물류
+  version: '1.0'
+  description: >
+    물류/택배 배송 기사의 배송 스케줄 및 경로 최적화.
+    VRP(Vehicle Routing Problem) 기반 모델링.
+  detection_keywords:
+    - 배송
+    - delivery
+    - 택배
+    - parcel
+    - 물류
+    - logistics
+    - 화물
+    - cargo
+    - 창고
+    - warehouse
+    - 허브
+    - hub
+    - 집하
+    - 권역
+    - route
+    - 경로
+    - vehicle
+    - 차량
+    - 적재
+    - load
+  sub_domains:
+    last_mile:
+      name_ko: 라스트마일 배송
+      keywords:
+        - 택배
+        - 배달
+        - last_mile
+        - delivery
+    line_haul:
+      name_ko: 간선 운송
+      keywords:
+        - 간선
+        - line_haul
+        - trunk
+        - hub_to_hub
+    cold_chain:
+      name_ko: 콜드체인
+      keywords:
+        - 냉장
+        - 냉동
+        - cold
+        - 신선
+        - fresh
+  problem_variants:
+    route_optimization:
+      - cvrp          # Capacitated VRP
+      - vrptw         # VRP with Time Windows
+      - pdvrp         # Pickup and Delivery VRP
+    schedule_assignment:
+      - driver_shift
+      - vehicle_allocation
+  data_columns:
+    orders:
+      source_file: orders.csv
+      fields:
+        - name: order_id
+          type: string
+          description: 주문 고유 ID
+        - name: customer_address
+          type: string
+          description: 배송지 주소
+        - name: time_window_start
+          type: time
+          description: 배송 시작 가능 시각
+        - name: time_window_end
+          type: time
+          description: 배송 종료 시각
+        - name: weight_kg
+          type: float
+          description: 화물 무게 (kg)
+        - name: volume_cbm
+          type: float
+          description: 화물 부피 (CBM)
+    vehicles:
+      source_file: vehicles.csv
+      fields:
+        - name: vehicle_id
+          type: string
+          description: 차량 ID
+        - name: capacity_kg
+          type: float
+          description: 적재 중량 (kg)
+        - name: capacity_cbm
+          type: float
+          description: 적재 부피 (CBM)
+        - name: depot
+          type: string
+          description: 출발 허브/창고
+stages:
+  route_optimization:
+    name_ko: 경로 최적화
+    typical_objectives:
+      - minimize_distance
+      - minimize_vehicles
+      - maximize_deliveries
+  schedule_assignment:
+    name_ko: 기사 배정
+    typical_objectives:
+      - minimize_overtime
+      - balance_workload

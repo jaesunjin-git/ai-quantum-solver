@@ -1,7 +1,6 @@
 ﻿// src/components/analysis/FlowStepBar.tsx
 import { BarChart3, ClipboardList, Database, Braces, Cpu, Target } from 'lucide-react';
-
-type StepId = 'analysis' | 'problem_def' | 'math_model' | 'solver' | 'result';
+import type { StepId } from '../../context/AnalysisContext';
 
 interface FlowStep { id: StepId; label: string; icon: React.ReactNode; }
 interface FlowStepBarProps {

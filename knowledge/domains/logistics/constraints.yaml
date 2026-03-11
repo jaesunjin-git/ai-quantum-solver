@@ -1,0 +1,254 @@
+version: '3.0'
+domain: logistics
+description: 물류 배송 스케줄링 제약조건 (VRP 기반)
+
+category_rules:
+  hard_keywords:
+    - 이내
+    - 이상
+    - 초과금지
+    - 반드시
+    - 필수
+    - must
+    - shall
+    - within
+  soft_keywords:
+    - 가급적
+    - 권장
+    - 목표
+    - 바람직
+    - prefer
+    - target
+    - recommend
+  default_if_ambiguous: hard
+
+variables:
+  x:
+    type: binary
+    indices: [I, K]
+    description: 주문 i를 차량 k에 배정
+  y:
+    type: binary
+    indices: [I, J, K]
+    description: 차량 k가 주문 i 다음에 주문 j를 방문
+  u:
+    type: binary
+    indices: [K]
+    description: 차량 k 활성화 여부
+
+constraints:
+  # ── Hard 제약 (고정) ──
+  order_coverage:
+    default_category: hard
+    fixed_category: true
+    name_ko: 주문 커버리지
+    description: 모든 주문은 정확히 한 차량에 배정되어야 한다
+    type: structural
+    expression:
+      lhs: "sum(x[i,k] for k in K)"
+      operator: "=="
+      rhs: "1"
+      for_all: "i in I"
+
+  vehicle_capacity_weight:
+    default_category: hard
+    fixed_category: true
+    name_ko: 중량 적재 제한
+    description: 차량별 적재 중량은 최대 용량을 초과할 수 없다
+    type: single_param
+    expression:
+      lhs: "sum(weight[i] * x[i,k] for i in I)"
+      operator: "<="
+      rhs: "capacity_kg[k]"
+      for_all: "k in K"
+    parameters:
+      capacity_kg:
+        typical_range: [1000, 5000]
+        unit: kg
+
+  vehicle_capacity_volume:
+    default_category: hard
+    fixed_category: true
+    name_ko: 부피 적재 제한
+    description: 차량별 적재 부피는 최대 용량을 초과할 수 없다
+    type: single_param
+    expression:
+      lhs: "sum(volume[i] * x[i,k] for i in I)"
+      operator: "<="
+      rhs: "capacity_cbm[k]"
+      for_all: "k in K"
+    parameters:
+      capacity_cbm:
+        typical_range: [5, 30]
+        unit: CBM
+
+  time_window:
+    default_category: hard
+    fixed_category: true
+    name_ko: 배송 시간 윈도우
+    description: 각 주문은 지정된 시간 윈도우 내에 배송되어야 한다
+    type: compound
+    expression:
+      lhs: "arrival_time[i]"
+      operator: "<="
+      rhs: "time_window_end[i]"
+      for_all: "i in I"
+
+  depot_return:
+    default_category: hard
+    fixed_category: true
+    name_ko: 허브 복귀
+    description: 모든 차량은 출발 허브로 복귀해야 한다
+    type: structural
+
+  # ── Hard 제약 (변경 가능) ──
+  max_driving_time:
+    default_category: hard
+    fixed_category: false
+    name_ko: 최대 운전 시간
+    description: 기사 일일 최대 운전 시간 제한
+    type: single_param
+    expression:
+      lhs: "total_driving[k]"
+      operator: "<="
+      rhs: "max_driving_min"
+      for_all: "k in K"
+    parameters:
+      max_driving_min:
+        typical_range: [360, 600]
+        unit: 분
+    detection_hints:
+      - 운전시간
+      - 최대 운전
+      - driving time
+      - max drive
+
+  max_work_time:
+    default_category: hard
+    fixed_category: false
+    name_ko: 최대 근무 시간
+    description: 기사 일일 최대 근무 시간 (운전 + 하역 + 대기)
+    type: single_param
+    expression:
+      lhs: "total_work[k]"
+      operator: "<="
+      rhs: "max_work_min"
+      for_all: "k in K"
+    parameters:
+      max_work_min:
+        typical_range: [480, 720]
+        unit: 분
+    detection_hints:
+      - 근무시간
+      - 근로시간
+      - work time
+      - max work
+
+  mandatory_break:
+    default_category: hard
+    fixed_category: false
+    name_ko: 필수 휴식
+    description: 연속 운전 후 최소 휴식 시간 보장
+    type: single_param
+    parameters:
+      continuous_driving_limit:
+        typical_range: [120, 240]
+        unit: 분
+      min_break_min:
+        typical_range: [15, 30]
+        unit: 분
+    detection_hints:
+      - 휴식
+      - 연속 운전
+      - break
+      - rest
+
+  max_stops:
+    default_category: hard
+    fixed_category: false
+    name_ko: 최대 정차 수
+    description: 차량당 최대 배송 정차 수 제한
+    type: single_param
+    expression:
+      lhs: "sum(x[i,k] for i in I)"
+      operator: "<="
+      rhs: "max_stops"
+      for_all: "k in K"
+    parameters:
+      max_stops:
+        typical_range: [20, 80]
+        unit: 건
+
+  # ── Soft 제약 ──
+  delivery_priority:
+    default_category: soft
+    fixed_category: false
+    name_ko: 우선 배송
+    description: 높은 우선순위 주문을 먼저 배송
+    type: data_derived
+    detection_hints:
+      - 우선
+      - priority
+      - VIP
+      - 긴급
+
+  zone_consistency:
+    default_category: soft
+    fixed_category: false
+    name_ko: 권역 일관성
+    description: 동일 권역 주문은 가급적 같은 차량에 배정
+    type: compound
+    detection_hints:
+      - 권역
+      - zone
+      - 지역
+      - area
+
+  workload_balance:
+    default_category: soft
+    fixed_category: false
+    name_ko: 업무량 균형
+    description: 기사 간 배송 건수/거리 균형 배분
+    type: compound
+    detection_hints:
+      - 균형
+      - balance
+      - 공평
+      - fairness
+
+  minimize_late_delivery:
+    default_category: soft
+    fixed_category: false
+    name_ko: 지연 최소화
+    description: 시간 윈도우 초과 배송 최소화
+    type: compound
+    detection_hints:
+      - 지연
+      - late
+      - 초과
+      - delay
+
+objectives:
+  minimize_distance:
+    type: minimize
+    description: 총 배송 거리 최소화
+    description_ko: 총 이동 거리 최소화
+    expression: "sum(distance[i,j] * y[i,j,k] for i,j in I, k in K)"
+
+  minimize_vehicles:
+    type: minimize
+    description: 투입 차량 수 최소화
+    description_ko: 투입 차량 수 최소화
+    expression: "sum(u[k] for k in K)"
+
+  maximize_deliveries:
+    type: maximize
+    description: 배송 완료율 최대화
+    description_ko: 배송 완료율 최대화
+    expression: "sum(x[i,k] for i in I, k in K)"
+
+  minimize_distance_with_penalties:
+    type: minimize
+    description: 총 거리 + 소프트 제약 위반 패널티 최소화
+    description_ko: 총 거리 + 패널티 최소화
+    expression: "sum(distance[i,j] * y[i,j,k]) + penalty_terms"

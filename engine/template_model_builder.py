@@ -303,12 +303,35 @@ def build_model_from_template(
             "category": "auto_computed",
         })
 
+        # ── Step 1: confirmed_problem 파라미터 값 병합 (최우선) ──
+        # problem_definition 단계에서 parameters.csv + 제약조건 values로 수집된 사용자 데이터
+        cp_params = confirmed_problem.get("parameters", {})
+        if cp_params:
+            for p in model_parameters:
+                pid = p["id"]
+                cp_val = cp_params.get(pid)
+                if cp_val is None:
+                    continue
+                if isinstance(cp_val, dict):
+                    val = cp_val.get("value")
+                    src = cp_val.get("source", "")
+                else:
+                    val = cp_val
+                    src = ""
+                if val is not None:
+                    p["default_value"] = val
+                    p["value"] = val
+                    p["source"] = src or "confirmed_problem"
+                    logger.info(f"Parameter '{pid}' = {val} (source: {src or 'confirmed_problem'})")
+
+        # ── Step 2: auto_defaults는 아직 값이 없는 파라미터에만 적용 ──
         for p in model_parameters:
             pid = p["id"]
             if pid in _auto_defaults and not p.get("value") and not p.get("default_value"):
                 p["default_value"] = _auto_defaults[pid]
                 p["value"] = _auto_defaults[pid]
                 p["auto_computed"] = True
+                logger.info(f"Parameter '{pid}' = {_auto_defaults[pid]} (source: auto_default)")
 
         model["parameters"] = model_parameters
 
@@ -320,14 +343,26 @@ def build_model_from_template(
         # soft 제약이 있으면 penalty 포함 목적함수 사용
         has_soft = bool(confirmed_constraints.get("soft", {}))
 
-        # 목적함수 매칭
-        if has_soft and "minimize_duties_with_penalties" in template_objectives:
-            obj_template = template_objectives["minimize_duties_with_penalties"]
-        elif "minimize_duties" in template_objectives:
-            obj_template = template_objectives["minimize_duties"]
-        else:
-            # 첫 번째 목적함수 사용
-            obj_template = next(iter(template_objectives.values()), {})
+        # 목적함수 매칭: confirmed_problem의 target을 우선 사용
+        obj_template = None
+        if obj_target in template_objectives:
+            # 사용자가 확정한 목적함수가 템플릿에 존재
+            obj_template = template_objectives[obj_target]
+            logger.info(f"Objective matched by confirmed target: {obj_target}")
+        elif has_soft and f"{obj_target}_with_penalties" in template_objectives:
+            # target + "_with_penalties" 변형 확인
+            obj_template = template_objectives[f"{obj_target}_with_penalties"]
+            logger.info(f"Objective matched with penalties variant: {obj_target}_with_penalties")
+
+        # fallback: 기본 목적함수
+        if obj_template is None:
+            if has_soft and "minimize_duties_with_penalties" in template_objectives:
+                obj_template = template_objectives["minimize_duties_with_penalties"]
+            elif "minimize_duties" in template_objectives:
+                obj_template = template_objectives["minimize_duties"]
+            else:
+                obj_template = next(iter(template_objectives.values()), {})
+            logger.info(f"Objective fallback used (target '{obj_target}' not found in template)")
 
         model["objective"] = {
             "type": obj_template.get("type", "minimize"),

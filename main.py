@@ -27,6 +27,10 @@ from core.settings_router import router as settings_router
 from chat.router import router as chat_router
 from core.version.version_router import router as version_router
 from core.project_router import router as project_router
+from core.auth_router import router as auth_router
+from engine.validation.router import router as validation_router
+from engine.validation.registry import get_registry
+from engine.validation.generic import register_all as register_generic_validators
 
 import logging
 
@@ -49,9 +53,11 @@ app.add_middleware(
 
 # 3. 라우터 등록
 app.include_router(chat_router)
-app.include_router(version_router)       # /api/chat
-app.include_router(project_router)    # /api/projects
-app.include_router(settings_router)   # /api/settings
+app.include_router(version_router)       # /api/projects/{id}/versions/*
+app.include_router(project_router)       # /api/projects
+app.include_router(settings_router)      # /api/settings
+app.include_router(auth_router)          # /api/auth/*
+app.include_router(validation_router)    # /api/validation/*
 
 def _migrate_solver_settings(db):
     """기존 core.solver_settings 테이블에 새 컬럼을 안전하게 추가"""
@@ -124,6 +130,11 @@ def startup():
     # 3. Create new tables
     Base.metadata.create_all(bind=engine)
 
+    # 4. Register validation pipeline
+    registry = get_registry()
+    register_generic_validators(registry)
+    print(f"Validation registry: {registry.validator_count} validators registered")
+
     # =========================================================
     # 3. 기초 데이터 시딩
     # =========================================================
@@ -161,7 +172,47 @@ def startup():
         db.add(models.ScenarioDB(task_key="crew_scheduling", config=crew_config))
         db.commit()
 
-    # [3] 문제 템플릿 데이터
+    # [3] 기본 사용자 시딩
+    if db.query(models.UserDB).count() == 0:
+        print("Initializing default users...")
+        from core.auth import hash_password
+        db.add(models.UserDB(
+            username="admin",
+            hashed_password=hash_password("admin1234"),
+            display_name="Super Admin",
+            role="admin",
+        ))
+        db.add(models.UserDB(
+            username="user",
+            hashed_password=hash_password("user1234"),
+            display_name="Researcher",
+            role="user",
+        ))
+        db.commit()
+
+    # [4] 솔버 설정 시딩 (YAML에 정의된 솔버를 DB에 등록)
+    if db.query(models.SolverSettingDB).count() == 0:
+        print("Initializing solver settings...")
+        default_solvers = [
+            {"solver_id": "classical_cpu", "enabled": True},
+            {"solver_id": "dwave_hybrid_cqm", "enabled": True},
+            {"solver_id": "dwave_nl", "enabled": True},
+            {"solver_id": "dwave_hybrid_bqm", "enabled": False},
+            {"solver_id": "dwave_advantage_qpu", "enabled": False},
+            {"solver_id": "dwave_advantage2_qpu", "enabled": False},
+            {"solver_id": "nvidia_cuopt", "enabled": False},
+            {"solver_id": "nvidia_cuquantum", "enabled": False},
+            {"solver_id": "nvidia_cudaq", "enabled": False},
+        ]
+        for s in default_solvers:
+            db.add(models.SolverSettingDB(
+                solver_id=s["solver_id"],
+                enabled=s["enabled"],
+                updated_by="system_seed",
+            ))
+        db.commit()
+
+    # [5] 문제 템플릿 데이터
     if db.query(models.ProblemTemplateDB).count() == 0:
         print("🚀 Initializing Problem Templates...")
         crew_template = models.ProblemTemplateDB(
@@ -198,25 +249,30 @@ def read_root():
 # 📂 공통 API (Menus, Chat History)
 # =========================================================
 
+from core.auth import get_current_user
+from core.models import UserDB
+
 @app.post("/api/menus", response_model=List[schemas.MenuResponse])
-def get_my_menus(request: dict, db: Session = Depends(get_db)):
-    return db.query(models.MenuDB).filter(models.MenuDB.role == request.get("role")).all()
+def get_my_menus(
+    current_user: UserDB = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return db.query(models.MenuDB).filter(models.MenuDB.role == current_user.role).all()
 
 
 @app.get("/api/chat/history")
 def get_chat_history(
     project_id: int,
-    user: str = Query(..., description="User Name"),
-    role: str = Query(default="user", description="User Role"),
+    current_user: UserDB = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    decoded_user = unquote(user)
+    owner_name = current_user.display_name or current_user.username
 
     # 프로젝트 소유자 확인
     project = db.query(models.ProjectDB).filter(models.ProjectDB.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
-    if role != "admin" and project.owner != decoded_user:
+    if current_user.role != "admin" and project.owner != owner_name:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
 
     logs = (

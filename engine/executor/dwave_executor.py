@@ -36,6 +36,8 @@ class DWaveExecutor(BaseExecutor):
             return self._execute_cqm(compile_result, time_limit)
         elif solver_type == "bqm":
             return self._execute_bqm(compile_result, time_limit)
+        elif solver_type == "nl":
+            return self._execute_nl(compile_result, time_limit)
         else:
             return ExecuteResult(success=False, error=f"Unknown solver_type: {solver_type}")
 
@@ -161,7 +163,7 @@ class DWaveExecutor(BaseExecutor):
             logger.info(f"BQM: energy={obj_val}, time={elapsed:.2f}s, samples={len(sampleset)}")
 
             return ExecuteResult(
-                success=success if obj_val is not None else False,
+                success=obj_val is not None,
                 solver_type="bqm",
                 status="FEASIBLE",
                 objective_value=obj_val,
@@ -181,3 +183,89 @@ class DWaveExecutor(BaseExecutor):
         except Exception as e:
             logger.error(f"BQM execution failed: {e}", exc_info=True)
             return ExecuteResult(success=False, solver_type="bqm", error=str(e))
+
+    def _execute_nl(self, compile_result, time_limit) -> ExecuteResult:
+        """NL/Stride 모델 실행 (LeapHybridNLSampler)"""
+        token = self._get_token()
+        if not token:
+            return ExecuteResult(success=False, error="DWAVE_API_TOKEN not configured")
+
+        try:
+            from dwave.system import LeapHybridNLSampler
+
+            nl_model = compile_result.solver_model
+            var_map = compile_result.variable_map
+
+            sampler = LeapHybridNLSampler(token=token)
+
+            logger.info(f"NL: submitting to D-Wave Stride (time_limit={time_limit}s)")
+            start = time.time()
+            sampler.sample(nl_model, time_limit=time_limit)
+            elapsed = time.time() - start
+
+            # NL 모델에서 솔루션 추출
+            # dwave.optimization.Model의 결과는 model.states를 통해 접근
+            solution = {}
+            obj_val = None
+
+            if nl_model.num_feasible() > 0:
+                status = "FEASIBLE"
+                success = True
+
+                # 목적함수 값 추출
+                try:
+                    obj_val = float(nl_model.objective.state(0))
+                except Exception:
+                    pass
+
+                # 변수 값 추출
+                for vid, var_data in var_map.items():
+                    if isinstance(var_data, dict):
+                        solution[vid] = {}
+                        for key, entry in var_data.items():
+                            if isinstance(entry, tuple):
+                                arr, idx = entry
+                                try:
+                                    val = float(arr.state(0, idx))
+                                    if val != 0:
+                                        solution[vid][str(key)] = val
+                                except Exception:
+                                    pass
+                    else:
+                        # 스칼라 변수
+                        try:
+                            val = float(var_data.state(0, 0))
+                            solution[vid] = val
+                        except Exception:
+                            solution[vid] = 0
+            else:
+                status = "INFEASIBLE"
+                success = False
+
+            logger.info(
+                f"NL: status={status}, obj={obj_val}, time={elapsed:.2f}s, "
+                f"feasible={nl_model.num_feasible()}"
+            )
+
+            return ExecuteResult(
+                success=success,
+                solver_type="nl",
+                status=status,
+                objective_value=obj_val,
+                solution=solution,
+                execution_time_sec=round(elapsed, 3),
+                solver_info={
+                    "num_feasible": nl_model.num_feasible(),
+                    "num_states": len(nl_model.states) if hasattr(nl_model, 'states') else 0,
+                },
+                raw_response=nl_model,
+            )
+
+        except ImportError:
+            return ExecuteResult(
+                success=False,
+                error="dwave-system not installed. Run: pip install dwave-system",
+            )
+        except Exception as e:
+            logger.error(f"NL execution failed: {e}", exc_info=True)
+            return ExecuteResult(success=False, solver_type="nl", error=str(e))

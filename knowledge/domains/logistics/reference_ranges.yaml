@@ -1,0 +1,98 @@
+# reference_ranges.yaml — Logistics domain parameter defaults by sub-domain
+
+last_mile:
+  max_driving_min:
+    default: 480
+    typical_range: [360, 600]
+    unit: 분
+    description: 라스트마일 기사 일일 최대 운전시간
+  max_work_min:
+    default: 600
+    typical_range: [480, 720]
+    unit: 분
+    description: 라스트마일 기사 일일 최대 근무시간
+  max_stops:
+    default: 60
+    typical_range: [30, 80]
+    unit: 건
+    description: 라스트마일 기사 일일 최대 배송건수
+  continuous_driving_limit:
+    default: 180
+    typical_range: [120, 240]
+    unit: 분
+  min_break_min:
+    default: 20
+    typical_range: [15, 30]
+    unit: 분
+  capacity_kg:
+    default: 1500
+    typical_range: [1000, 3000]
+    unit: kg
+  capacity_cbm:
+    default: 12
+    typical_range: [8, 20]
+    unit: CBM
+
+line_haul:
+  max_driving_min:
+    default: 540
+    typical_range: [420, 660]
+    unit: 분
+    description: 간선 운송 기사 일일 최대 운전시간
+  max_work_min:
+    default: 660
+    typical_range: [540, 780]
+    unit: 분
+    description: 간선 운송 기사 일일 최대 근무시간
+  max_stops:
+    default: 10
+    typical_range: [5, 20]
+    unit: 건
+    description: 간선 운송 최대 정차수 (허브 간)
+  continuous_driving_limit:
+    default: 240
+    typical_range: [180, 300]
+    unit: 분
+  min_break_min:
+    default: 30
+    typical_range: [20, 45]
+    unit: 분
+  capacity_kg:
+    default: 5000
+    typical_range: [3000, 15000]
+    unit: kg
+  capacity_cbm:
+    default: 25
+    typical_range: [15, 40]
+    unit: CBM
+
+cold_chain:
+  max_driving_min:
+    default: 420
+    typical_range: [300, 540]
+    unit: 분
+    description: 콜드체인 기사 일일 최대 운전시간 (시간 제약 엄격)
+  max_work_min:
+    default: 540
+    typical_range: [420, 660]
+    unit: 분
+  max_stops:
+    default: 40
+    typical_range: [20, 60]
+    unit: 건
+  continuous_driving_limit:
+    default: 150
+    typical_range: [90, 210]
+    unit: 분
+  min_break_min:
+    default: 20
+    typical_range: [15, 30]
+    unit: 분
+  capacity_kg:
+    default: 2000
+    typical_range: [1000, 5000]
+    unit: kg
+  capacity_cbm:
+    default: 15
+    typical_range: [8, 25]
+    unit: CBM
